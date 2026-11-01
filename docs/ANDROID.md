@@ -463,9 +463,44 @@ checks **all rows**, not only selected survivors.
 
 Coordinator host ORT tests verified exact NumPy parity, empty chunks/indices,
 prefix length 128, and rejection of NaN and either infinity in an unselected
-row. These are helper-graph checks, not yet proof of Android cache ownership or
-memory use. No weights are included; the helpers do not change the underlying
+row. No weights are included; the helpers do not change the underlying
 checkpoint's non-commercial terms or the application's default engine.
+
+### Native-owned beam caches
+
+The separate `FlareBeamDecoder` keeps growing self caches in native ORT results.
+Gathered tensors are borrowed through each decoder call; all decoder chunk
+results remain live until merge. The old cache closes only after the new cache
+passes the all-row finite check. Java receives vocabulary logits and the scalar
+finite flag, not the full cache arrays. Cancellation and exception paths close
+the same owners. This is a CPU-only experimental module, not app wiring.
+
+For direct QA, copy the three weighted graphs and `metadata.json`, the matching
+helper graphs and `cache.json`, and the numeric fixture's `face.f32`, `lip.f32`
+and `manifest.json` into app-private `files/experimental-flare-native-cache/`.
+The helper width, export width and fixture width must match. Build and install
+**both** the current app and test APKs, then run:
+
+```sh
+adb shell am instrument -w -r \
+  -e class com.stilltype.android.engine.NativeFlareCacheBenchmarkTest \
+  com.stilltype.android.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Coordinator API 36 x86_64 emulator checks passed complete independent sequences
+for beam 50 (136 frames, 19 tokens) and beam 5 (129 frames, 29 tokens). On the
+beam-50 fixture, the native-cache loop measured **9,575 ms**, versus 12,458 ms
+with Java caches and the stable heap, and 15,039 ms before the heap change.
+Native decoder calls took 7,534 ms, gather 347 ms, merge 488 ms, and output
+copying 782 ms. These are separate-run internal CPU timings, not a controlled
+phone speedup or camera-to-text measurement. Encoder execution was 4,475 ms.
+
+A helper-only native stress journey expanded one row into 50 rows at prefix
+length 128, gathered duplicated/non-monotonic parents and rejected NaN in an
+unselected row. The largest Java-heap sample while the full cache was live was
+56,278,016 bytes, **not a peak**; this is not a full 128-token recognition run.
+The ordinary recognition fixture's after-close PSS sample is not a runtime-
+memory measurement. No physical Pixel, GPU or lower total-memory claim is made.
 
 ## Compute notes
 
