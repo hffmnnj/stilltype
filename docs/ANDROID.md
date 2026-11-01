@@ -385,6 +385,24 @@ beam execution and token parity, **not** camera-to-text latency, physical Pixel
 acceleration or beam-50 accuracy. The application and delivered APK retain their
 existing model.
 
+### Compact graph compatibility
+
+`tools/pack_flare.py` can reduce the three beam-5 graph files from 666,988,252
+to 338,099,826 bytes while retaining FP32 computation through weight Casts.
+It does not add a native dependency or change the installed application's model.
+Use the packed directory with `tools/benchmark_flare.py`, then transfer its
+graphs and newly generated numeric fixture to `files/experimental-flare-beam/`
+and run the same batched-beam test above.
+
+The coordinator ran the final published packer and the actual API 36 emulator
+test. All 29 tokens matched the independent reference on the 129-frame fixture;
+the test completed in 11.52 seconds. Encoder execution was 4,796 ms and the
+complete beam loop 1,856 ms. Those are compatibility-run stage timings, not a
+controlled speed comparison or camera-to-text latency. Sampled process PSS was
+1,290,081 KiB after decoding: **no memory reduction is claimed**. The emulator
+was stopped after the check. Physical Pixel and camera-path compatibility remain
+unverified, and the delivered APK still uses the existing model.
+
 ## Compute notes
 
 `AUTO` requests NNAPI with `CPU_DISABLED`, excluding NNAPI's reference CPU
