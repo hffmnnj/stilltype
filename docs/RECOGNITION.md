@@ -288,3 +288,67 @@ ungated model switch is not safe to ship. The original fixed-set halving and
 the 10% WER target remain unmet. A new model needs validated quiet detection,
 portable runtime measurements, and stronger source/speaker coverage before
 becoming an application default.
+
+The weak-motion CTC-evidence idea was also tried with the existing desktop
+joint-beam decoder on CPU. It recovered rejected clips but raised confirmation
+WER from 236/240 to 244/240 errors. That decoder/gate combination was rejected;
+the Android improvement does not establish a benefit for every decoder.
+
+## Portable FLARE research utilities
+
+`tools/export_flare.py` exports the pinned Base encoder and next-token decoder
+as FP32 ONNX opset-17 graphs. `tools/benchmark_flare.py` executes them using
+ONNX Runtime CPU, without Torch or fairseq, and creates a private numeric fixture
+for the Android benchmark in [ANDROID.md](ANDROID.md). Neither tool changes
+the installed application's model or bypasses its quiet-input checks.
+
+Use separate environments: the verified exporter used **Python 3.10**, Torch
+2.7.1, fairseq 0.12.2, OmegaConf 2.0.6, Hydra 1.0.7, SentencePiece 0.2.2,
+NumPy 1.26.4 and ONNX 1.20.1. Fairseq was built from its full v0.12.2 source
+checkout, not the incomplete source distribution. Runtime checks used
+**Python 3.12 and ORT 1.24.3**; that ORT release has no Python 3.10 wheel.
+These legacy export dependencies are not added to the app's inference runtime.
+
+Supply a trusted official FLARE checkout at revision
+`7c8f76c788a01f9270a3badfd2eeab45a979c44a`, the checkpoint described above,
+and a reference-free NPZ containing only `face` and `lip` uint8 arrays of equal
+shape `[T,96,96]`, with 1–200 frames at 25 fps. Cropping and face tracking are
+not supplied by these utilities; the preprocessing limitations above still
+apply. Do not package non-commercial weights as unrestricted app assets.
+
+```sh
+# EXPORT_PY is the isolated Python 3.10 interpreter with the dependencies above.
+"$EXPORT_PY" tools/export_flare.py \
+  --checkpoint /path/flare-base-finetuned.pt --source /path/trusted-FLARE \
+  --sample /path/visual-only.npz --output /path/flare-onnx \
+  --device auto --accept-license
+
+# RUNTIME_PY needs NumPy and ONNX Runtime, but no fairseq or Torch.
+"$RUNTIME_PY" tools/benchmark_flare.py --model-dir /path/flare-onnx \
+  --sample /path/visual-only.npz --output /path/android-flare-fixture
+```
+
+Outputs must be outside Git working trees and existing artifacts are not
+overwritten. The exporter verifies the fixed checkpoint's size and SHA-256
+before source import or deserialization. The source checkout is trusted
+executable code; graph hashes establish file consistency, not independent
+authenticity. The runtime fixture directory is owner-only (`0700`) because
+normalized face/lip pixels and generated token IDs can be sensitive.
+
+The graphs use batch size one, dynamic frame/prefix axes, a 512-dimensional
+encoder output and a 1,000-token vocabulary. Metadata records ordered symbols,
+geometry, normalization, provenance and graph hashes. The decoder's causal mask
+is constructed dynamically; a cached trace-time mask is not valid for longer
+prefixes. Greedy decoding starts with EOS, excludes PAD and first-step EOS,
+and **fails** if the model does not terminate within 128 iterations. Callers
+must enforce the 200-frame bound. Padding and exact-boundary parity remain
+unverified; this is not a streaming or app-ready decoder.
+
+On eight real development inputs, the exported graphs matched all complete
+Torch greedy token sequences and all 24 next-token argmax checks at prefix
+lengths 1, 5 and 10. Maximum encoder difference was 0.002622; maximum next-token
+log-probability difference was 0.001739. Greedy WER was **55/141 = 39.01%**,
+not the beam-50 model's 46/141. On a Ryzen 9 8945HS with four ORT threads,
+encoder time was 0.92–1.42 seconds per clip and full-prefix decoder time was
+0.25–0.99 seconds, excluding graph loading and preprocessing. The decoder
+recomputes its prefix on every step; these are not phone speed measurements.
