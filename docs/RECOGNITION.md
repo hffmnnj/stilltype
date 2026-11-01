@@ -791,6 +791,76 @@ The unchanged production Qwen3.5 4B Intent policy again completed all twelve raw
 development inputs without fallback but left errors at **46/161**. It failed the
 fixed at-most-39 eligibility rule and received no new held-out Intent run.
 
+An independent rank-32/alpha-64 low-rank run started from the first-stage model
+and kept its original weights and buffers frozen. It adapted 180 attention and
+feed-forward linear weights across the twelve visual and six decoder blocks,
+using the same 878 examples for twenty epochs, seed 20261114, AdamW at 0.0001,
+accumulation eight and the same paired augmentations. Zero-initialized adapters
+preserved the original numerical output; first gradients reached the B matrices
+and then the A matrices after an update. Original-state and merged-target checks
+passed, and both twelve-clip generations completed without errors. Silent
+development gave **54/161** errors and ordinary-speech development **23/170**.
+Although eligible against the first-stage model, it lost to the expanded model's
+46/161, so it was not selected for fresh evaluation. This is an independent
+standard low-rank experiment, not a reproduction of a published personalized
+lipreading result. Its changed-state SHA-256 is
+`cb01a3247e1b7186e851f4617feabd5f9b675bc55a2a63500dc63bc3b0c3b44f`.
+
+#### Fresh silent-mouthing session
+
+The expanded model was selected on the original development set before any
+fresh reference scoring. The deeper 500-example and original-resolution
+candidates failed their development eligibility rule; the low-rank candidate
+lost the same development comparison. No fresh results were used to choose
+between them, and Intent was not applied to the fresh inputs.
+
+The new cohort uses `SoniSpeech_silent_eval` session 005: **a different recording
+session, not a different participant**. Of fifty records, forty-two passed the
+text, timestamp and actual-video-duration checks. After excluding known training
+and original evaluation text hashes, Python's `random.Random(20261111)` fixed
+twenty-four utterances, split into twelve test and twelve confirmation clips.
+All 2,853 raw frames were retained in the final 25 fps inputs; all twenty-four
+face/lip preparations succeeded, with 64–177 frames per input. The video SHA-256
+is `cc055b2f7d0e3a753d564b088ce8677ce87bef2b234b955611cf900a53b82a78`;
+the reference-free input manifest SHA-256 is
+`b72e27f9bac397a39628b8e87b1a0e2da3fc9eae59db77b7bdfad3bd4ebf3eb0`.
+
+Baseline and first-stage predictions were frozen before selection of the new
+model. The selected expanded model was strictly reloaded, matched its trained
+state groups and reproduced a stored development raw prediction and visual
+score before decoding these inputs. All fresh raw predictions were frozen before
+scoring. Current-model speech rejections remain in the denominator:
+
+| Host system | Test, 147 words | Confirmation, 164 words | Combined, 311 words |
+| --- | ---: | ---: | ---: |
+| Current desktop, joint beam 5 and existing gate | 146/147 = 99.32% | 164/164 = 100.00% | 310/311 = 99.68% |
+| Current INT8 CTC, evidence gate and desktop alignment | 129/147 = 87.76% | 138/164 = 84.15% | 267/311 = 85.85% |
+| First-stage personal model, ungated beam 50 | 89/147 = 60.54% | 94/164 = 57.32% | 183/311 = 58.84% |
+| Selected expanded personal model, ungated beam 50 | **46/147 = 31.29%** | **43/164 = 26.22%** | **89/311 = 28.62%** |
+
+The selected model cuts host INT8 word errors by **64.34% on test and 68.84% on
+confirmation**, meeting the first halving on both splits of this disclosed
+cohort. Combined errors fall **66.67%**, from 267 to 89. Against the first-stage
+personal model, combined errors fall **51.37%**, but the separate reductions are
+48.31% and 54.26%; that is not a second halving on both splits. A second halving
+relative to the original INT8 baseline would require at most 66 combined errors,
+not 89. The **10% WER target remains unmet**.
+
+Four of twenty-four expanded-model sentences were exact, two per split; none
+were exact for the other three systems. There were no preparation or inference
+errors for the INT8 or personal paths. Desktop returned explicit no-speech for
+ten test and all twelve confirmation clips. The frozen expanded prediction
+SHA-256 is
+`3b393c3fb34542ce63196da003d33ad515632f73797b65d12ec93e71d26f88b7`.
+
+This is **one-person, research-only, genuinely silent prompted-video evidence**,
+not a result on the user's Pixel, a population accuracy estimate or an original
+GRID halving. Reference text describes the prompted sentence, not independently
+verified word-by-word mouthing. Unknown pretraining overlap and the source's
+non-commercial terms still apply. The personal path is ungated; the application
+retains its existing quiet-input checks and models. These weights are not
+bundled in the delivered APK.
+
 #### Reproduce the personal training recipe
 
 `tools/adapt_flare.py` exposes the fixed recipes without evaluation
