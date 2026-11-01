@@ -214,3 +214,77 @@ quiet ROI, and a 120-second / 3,001-frame repeated-ROI session through the Andro
 recognizer. Speech became nonempty, quiet remained `no-speech`, and the full
 session completed. The short speech fixture still had 5 errors in 6 words; this
 is pipeline evidence, not accurate dictation or physical-phone verification.
+
+## Broader 2026 model experiments
+
+These are research measurements, **not a new app engine or a 90%-accuracy
+claim**. [FLARE](https://github.com/jxzhanggg/FLARE) combines full-face and lip
+inputs with a Transformer decoder. Its [2026 paper, Table 2](https://arxiv.org/html/2610.19559v1)
+distinguishes the Base and Large encoders from the separate 7B LLM variant.
+The paper's best 13.2% LRS3 WER belongs to Large plus the LLM, not the Base
+checkpoint used below. Neither a paper score nor these experiments establishes
+performance on silent mouthing or a phone.
+
+The [released checkpoints](https://huggingface.co/Anony94/FLARE-checkpoints)
+state **CC-BY-NC-4.0**, separate from the repository's code license. Research
+used the fine-tuned Base checkpoint at revision
+`6187ad650dc1786a8efc8b6bfbee37bbf62c4b2e`, SHA-256
+`fe8c8ecab633bd4e3e490924e2bc917420b4d18d7309a5cd612902ccc842853b`.
+Weights, videos, prepared arrays and reference text are not redistributed here.
+Loading used `weights_only=True`, an explicit three-class allowlist and strict
+state-dict matching; missing training-only configuration was reconstructed from
+the published configuration and launch scripts.
+
+### Natural-speech diagnostic
+
+A public-domain [White House weekly address](https://commons.wikimedia.org/wiki/File:2017-01-07_President_Obama%27s_Weekly_Address.webm)
+provided a more natural-language diagnostic than GRID. Before inference, the
+first 42 subtitle cues were grouped consecutively into at most 7.8-second clips:
+8 development clips / 141 reference words, then 9 test clips / 148 words. The
+manifest SHA-256 is
+`2a7c7ce060a20badfcfd2c34c929941791fa6a0a4d0d7bab9624907429d59737`.
+Both splits share one speaker and source; they are not independent populations.
+Training overlap is unknown. Caption-derived words and timing have not been
+independently audio-verified, so these scores are **provisional**. Audio,
+captions and references were never inputs to recognition or correction.
+
+| System | Development errors / words | Test errors / words |
+| --- | ---: | ---: |
+| Current desktop Base+, joint beam 5 | 70/141 = 49.65% | 70/148 = 47.30% |
+| FLARE Base, beam 50 | 46/141 = 32.62% | 34/148 = 22.97% |
+| FLARE Base + optional Qwen3.5 4B Intent | 45/141 = 31.91% | 32/148 = 21.62% |
+
+The FLARE test error count is 51.43% below the desktop baseline on this source.
+This does **not** mean the original GRID target was halved. Intent removed only
+two further test errors, not half the remaining errors, and is not raw visual
+accuracy. All three Qwen tiers were tested on development hypotheses; the two
+smaller tiers left FLARE WER unchanged. One rejected 4B development correction
+fell back to the raw text. No tier received the reference or a speaker hint.
+
+Preprocessing is a material confound: the current desktop model with the
+alternative lip crops scored 54/141 development errors instead of 70/141.
+FLARE used approximate aligned full-face crops and an approximate MediaPipe
+68-point mapping, rather than exact published preprocessing. It decoded prepared
+JPEG frames. This is not a paper reproduction. The larger 342M-encoder
+checkpoint scored 44/141 development errors, versus Base's 46/141; that small
+gain did not justify a switch or another held-out comparison.
+
+### Original-corpus and quiet checks
+
+The same Base configuration was also measured on all 80 fixed GRID speech
+clips and 27 development quiet regions, with no decoder tuning against their
+references. The gate below applies the existing threshold-8 acceptance check
+from desktop-aligned ROIs; accepted FLARE predictions use the full clip, not
+the desktop decoder's trimmed speech span.
+
+| FLARE Base | Development, 120 words | Test, 120 words | Confirmation, 240 words |
+| --- | ---: | ---: | ---: |
+| Ungated research decode | 88/120 = 73.33% | 83/120 = 69.17% | 171/240 = 71.25% |
+| Existing motion-8 acceptance | 99/120 = 82.50% | 110/120 = 91.67% | 212/240 = 88.33% |
+
+No preparation or model calls failed. **All 27 quiet regions produced nonempty
+text without a gate**; the existing gate rejected all 27. Consequently an
+ungated model switch is not safe to ship. The original fixed-set halving and
+the 10% WER target remain unmet. A new model needs validated quiet detection,
+portable runtime measurements, and stronger source/speaker coverage before
+becoming an application default.
