@@ -53,6 +53,15 @@ export interface InstallProgress {
   message: string;
   progress: number;
 }
+export interface CleanupStatus {
+  runtimeBundled: boolean;
+  modelInstalled: boolean;
+  ready: boolean;
+  modelId: string;
+  device: string;
+  error: string | null;
+  totalBytes: number;
+}
 export interface CapturedFrame {
   jpeg: string;
   timestamp: number;
@@ -65,6 +74,7 @@ export interface TranscriptionResult {
   inferenceMs: number;
   frames: number;
   error: string | null;
+  cleanupWarning?: string | null;
 }
 export interface CaptureQuality {
   faceDetected: boolean;
@@ -73,11 +83,31 @@ export interface CaptureQuality {
   fps: number;
   hint: string;
 }
+export type OverlayPhase = 'ready' | 'opening' | 'recording' | 'processing' | 'done' | 'error';
+export type OverlayAction = 'preview' | 'start' | 'stop' | 'cancel' | 'open' | 'dismiss' | 'copy';
+export interface OverlaySnapshot {
+  visible: boolean;
+  phase: OverlayPhase;
+  elapsed: number;
+  text: string;
+  message: string;
+  cameraOpen: boolean;
+  theme: 'light' | 'dark';
+}
+export interface ShortcutStatus {
+  fnSupported: boolean;
+  fnActive: boolean;
+  message: string;
+}
+export interface DictationShortcut {
+  state: 'pressed' | 'released';
+  source: 'fn' | 'shortcut' | 'tray';
+}
 export const defaultSettings: Settings = {
   theme: 'system', cameraId: '', mirrored: true, showPreview: true,
   shortcut: 'CommandOrControl+Shift+Space', dictationMode: 'toggle',
   autoPaste: false, keepHistory: true, retentionDays: 30,
-  cleanupEnabled: false, cleanupModel: 'qwen3.5:4b',
+  cleanupEnabled: false, cleanupModel: 'qwen3.5-0.8b-2026-q4',
   pauseSeconds: 0.7, beamSize: 5, inferenceDevice: 'auto', maxClipSeconds: 30, context: '',
 };
 /** Native command arguments and worker requests use camelCase payload fields. */
@@ -97,6 +127,11 @@ export interface DesktopApi {
   cancelClip(clipId: string): Promise<void>;
   copyText(text: string): Promise<void>;
   pasteText(text: string): Promise<void>;
-  ollamaModels(): Promise<string[]>;
+  cleanupStatus(): Promise<CleanupStatus>;
+  installCleanup(acceptLicense: boolean): Promise<CleanupStatus>;
   exportData(format: 'json' | 'txt' | 'csv'): Promise<string>;
+  getOverlayState(): Promise<OverlaySnapshot>;
+  updateOverlay(snapshot: OverlaySnapshot): Promise<void>;
+  overlayAction(action: OverlayAction): Promise<void>;
+  shortcutStatus(): Promise<ShortcutStatus>;
 }

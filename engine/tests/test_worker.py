@@ -323,11 +323,6 @@ class VocabularyMapping(unittest.TestCase):
         self.assertEqual(inference.vocab_pairs(None), [])
         self.assertEqual(inference.apply_vocabulary("hello world", []), "hello world")
 
-    def test_cleanup_disabled_returns_none(self):
-        self.assertIsNone(
-            inference.maybe_cleanup("hello", enabled=False, model=None, context="", pairs=[])
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

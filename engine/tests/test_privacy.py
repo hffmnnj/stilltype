@@ -1,11 +1,19 @@
-"""Exercise the actual Ollama HTTP adapter without any external service."""
+"""Privacy regression: recognition inference makes no network calls.
 
+Optional cleanup now runs in the Rust layer after Python recognition, so
+even legacy cleanup settings arriving over stdio must be ignored here and
+must never trigger outbound traffic. This exercises the real successful
+transcribe_clip path (moving mouth, injected model, vocabulary) with
+socket creation blocked.
+"""
+
+import base64
 import json
 import os
+import socket
 import sys
-import threading
+import tempfile
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,53 +21,94 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import inference
 
 
-class LoopbackPrivacy(unittest.TestCase):
-    def test_cleanup_ignores_proxies_and_does_not_follow_redirects(self):
-        requests = []
+def _landmarks():
+    return [[100.0, 100.0], [200.0, 100.0], [150.0, 150.0], [150.0, 200.0]]
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                requests.append((self.path, json.loads(body)))
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b'{"response":"Local reply."}')
 
-            def do_GET(self):
-                requests.append((self.path, None))
-                if self.path == "/api/tags":
-                    self.send_response(302)
-                    self.send_header("Location", "/unexpected-redirect")
-                    self.end_headers()
-                else:
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'{"models":[{"name":"qwen3.5:4b"}]}')
+def _frame(ts_ms):
+    return {
+        "jpeg": base64.b64encode(b"not-a-jpeg").decode(),
+        "timestamp": ts_ms,
+        "landmarks": _landmarks(),
+    }
 
-            def log_message(self, *_args):
-                pass
 
-        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            origin = f"http://127.0.0.1:{server.server_port}"
-            try:
-                with patch.object(inference, "OLLAMA_URL", origin), patch.dict(
-                    os.environ,
-                    {"http_proxy": "http://127.0.0.1:1", "HTTP_PROXY": "http://127.0.0.1:1",
-                     "no_proxy": "", "NO_PROXY": ""},
-                ):
-                    self.assertEqual(
-                        inference._ollama_generate("Keep these words private.", "qwen3.5:4b"),
-                        "Local reply.",
-                    )
-                    self.assertFalse(inference._ollama_available("qwen3.5:4b"))
-            finally:
-                server.shutdown()
-                thread.join(timeout=2)
+def _write_clip(records):
+    d = tempfile.mkdtemp(prefix="stilltype-clip-")
+    with open(os.path.join(d, "frames.jsonl"), "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    return d
 
-        self.assertEqual([path for path, _ in requests], ["/api/generate", "/api/tags"])
-        self.assertEqual(requests[0][1]["prompt"], "Keep these words private.")
+
+class NoNetworkRecognition(unittest.TestCase):
+    def test_legacy_cleanup_settings_cause_no_network(self):
+        """A successful decode with legacy cleanup keys touches no socket."""
+        import numpy as np
+
+        clip = _write_clip([_frame(i * 40.0) for i in range(40)])
+        real_decode = inference.decode_records
+        real_align = inference.align_mouths
+
+        def fake_model(beam, device):
+            class M:
+                def __call__(self, rois, fps):
+                    return "HELLO STILL TYPE", 7
+
+                device = "cpu"
+
+            return M()
+
+        rois = np.full((40, 96, 96), 128, np.uint8)
+        for i in range(40):
+            if (i // 2) % 2 == 0:
+                rois[i, 24:72, 16:48] = 200
+                rois[i, 24:72, 48:80] = 60
+            else:
+                rois[i, 24:72, 16:48] = 60
+                rois[i, 24:72, 48:80] = 200
+
+        vocabulary = [
+            {"id": "a", "word": "still type", "replacement": "Stilltype",
+             "createdAt": "t"}
+        ]
+        settings = {
+            "cleanupEnabled": True,
+            "cleanupModel": "qwen3.5:4b",
+            "context": "secret prior text",
+        }
+        try:
+            inference.decode_records = lambda _records: (
+                np.zeros((40, 120, 120), np.uint8),
+                [np.asarray(_landmarks(), np.float32)] * 40,
+            )
+            inference.align_mouths = lambda _frames, _lms: rois
+            with (
+                patch.object(
+                    socket, "socket",
+                    side_effect=AssertionError("network access attempted"),
+                ),
+                patch.object(
+                    socket, "create_connection",
+                    side_effect=AssertionError("network access attempted"),
+                ),
+            ):
+                result = inference.transcribe_clip(
+                    clip,
+                    settings=settings,
+                    vocabulary=vocabulary,
+                    model_factory=fake_model,
+                )
+        finally:
+            inference.decode_records = real_decode
+            inference.align_mouths = real_align
+
+        # A successful prediction: past the face/still gates, raw preserved,
+        # vocabulary applied, legacy cleanup keys ignored, no socket touched.
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["raw"], "HELLO STILL TYPE")
+        self.assertEqual(result["text"], "Hello Stilltype")
+        self.assertEqual(result["device"], "cpu")
 
 
 if __name__ == "__main__":

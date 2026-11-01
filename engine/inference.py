@@ -15,7 +15,7 @@ installer-written marker ``MODEL_DIR/installed.json``::
      "checkpoint": "usr2/baseplus.pth", "sha256": "<hex>"}
 
 Everything in this module except ``USR2Visual`` is model-independent: clip
-parsing, mouth-ROI gating, vocabulary mapping, cleanup. ``USR2Visual`` is
+parsing, mouth-ROI gating, and vocabulary mapping. ``USR2Visual`` is
 the replaceable model adapter behind ``__call__(rois, fps) -> (text, ms)``.
 
 Speech input handling: clips are directories owned by Rust with
@@ -23,9 +23,10 @@ Speech input handling: clips are directories owned by Rust with
 prefix, ``timestamp`` in ms from recording start, ``landmarks`` null or the
 four image-pixel points image-left eye, image-right eye, nose base, mouth
 centre). This module never invents a transcript: invalid, too-short,
-faceless or still clips are reported through the ``error`` field, and the
-only network use is the explicitly opt-in cleanup pass, pinned to the
-loopback Ollama at http://127.0.0.1:11434.
+faceless or still clips are reported through the ``error`` field.
+Recognition inference makes no network calls: it is strictly visual
+recognition plus vocabulary, and any optional cleanup runs in the Rust
+layer after Python recognition.
 """
 
 from __future__ import annotations
@@ -38,8 +39,6 @@ import os
 import re
 import sys
 import time
-import urllib.error
-import urllib.request
 
 import numpy as np
 
@@ -74,9 +73,6 @@ MODEL_FPS = 25.0
 FALLBACK_FPS = 25.0
 DEFAULT_BEAM_SIZE = 5
 DEFAULT_PAUSE_SECONDS = 0.7
-DEFAULT_CLEANUP_MODEL = "qwen3.5:4b"
-#: The only host the opt-in cleanup pass may contact (loopback Ollama).
-OLLAMA_URL = "http://127.0.0.1:11434"
 
 #: Error codes that may appear in TranscriptionResult.error.
 CLIP_ERRORS = ("invalid-clip", "too-short", "no-face", "no-speech")
@@ -673,95 +669,6 @@ def apply_vocabulary(text: str, pairs: list[tuple[list[str], str]]) -> str:
     return " ".join(out)
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Block HTTP redirects so cleanup traffic never leaves loopback."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(
-            newurl, code, f"blocked redirect to {newurl!r}", headers, fp
-        )
-
-
-def _loopback_opener() -> urllib.request.OpenerDirector:
-    """Opener that ignores proxies and never follows redirects."""
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), _NoRedirect
-    )
-
-
-def _loopback_open(url_or_req, timeout: float):
-    """Open a loopback-only Ollama URL without proxies or redirects."""
-    url = (
-        url_or_req.full_url
-        if isinstance(url_or_req, urllib.request.Request)
-        else url_or_req
-    )
-    if not isinstance(url, str) or not url.startswith(OLLAMA_URL + "/"):
-        raise ValueError(f"refusing non-loopback url: {url!r}")
-    return _loopback_opener().open(url_or_req, timeout=timeout)
-
-
-def _ollama_available(model: str) -> bool:
-    try:
-        with _loopback_open(f"{OLLAMA_URL}/api/tags", timeout=1) as r:
-            names = [m.get("name") for m in json.load(r).get("models", [])]
-        return model in names
-    except Exception:
-        return False
-
-
-def _ollama_generate(prompt: str, model: str) -> str:
-    body = json.dumps(
-        {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0},
-        }
-    ).encode()
-    req = urllib.request.Request(
-        f"{OLLAMA_URL}/api/generate", body, {"Content-Type": "application/json"}
-    )
-    with _loopback_open(req, timeout=30) as r:
-        return str(json.load(r).get("response", "")).strip().strip('"')
-
-
-CLEANUP_PROMPT = """You correct the output of a silent-speech lipreading system into fluent dictation text.
-
-Rules: keep every word that already fits; only replace a word where it clearly does not fit the sentence. Do not add ideas, do not answer the text, never repeat a phrase twice. Reply with only the corrected text, with normal capitalisation and punctuation.
-
-Transcript to fix:
-{transcript}"""
-
-
-def maybe_cleanup(
-    text: str, *, enabled: bool, model: str | None, context: str | None, pairs: list[tuple[list[str], str]]
-) -> str | None:
-    """Opt-in cleanup pass. Returns corrected text, or None to keep `text`.
-
-    Pinned to loopback Ollama; any failure logs a warning and falls back.
-    """
-    if not text or not enabled:
-        return None
-    model = model or DEFAULT_CLEANUP_MODEL
-    if not _ollama_available(model):
-        return None
-    prompt = CLEANUP_PROMPT.format(transcript=text)
-    if context:
-        prompt = f"Already-written text (context only, do not repeat it):\n{context}\n\n" + prompt
-    keep = [original for _, original in pairs]
-    if keep:
-        prompt += "\nKeep these words and names exactly as written: " + ", ".join(keep)
-    try:
-        return apply_vocabulary(_ollama_generate(prompt, model), pairs) or None
-    except Exception as e:  # noqa: BLE001
-        print(
-            f"stilltype: cleanup failed ({type(e).__name__}: {e}), using raw transcript",
-            file=sys.stderr,
-        )
-        return None
-
-
 def transcribe_clip(
     clip_dir: str,
     *,
@@ -770,19 +677,19 @@ def transcribe_clip(
     model_factory=None,
     final: bool = True,
 ) -> dict:
-    """Full pipeline: parse -> gates -> decode -> model -> vocab -> cleanup.
+    """Full pipeline: parse -> gates -> decode -> model -> vocab.
 
     Clip problems return a result dict with `error` set (never raise).
     Only infrastructure failures raise ModelUnavailable. `model_factory`
     (taking beam size and device) exists for tests; production uses
     ensure_model. The result carries the actual `device` used.
+    Recognition makes no network calls; extra settings arriving over
+    stdio (such as legacy cleanup keys owned by the Rust layer) are
+    ignored. Returns real text and raw exactly as recognised.
     """
     cfg = {
         "beamSize": DEFAULT_BEAM_SIZE,
         "pauseSeconds": DEFAULT_PAUSE_SECONDS,
-        "cleanupEnabled": False,
-        "cleanupModel": DEFAULT_CLEANUP_MODEL,
-        "context": "",
         "inferenceDevice": "auto",
     }
     if settings:
@@ -833,15 +740,6 @@ def transcribe_clip(
     pairs = vocab_pairs(vocabulary)
     fixed = apply_vocabulary(raw.lower(), pairs) if raw else ""
     text = (fixed[:1].upper() + fixed[1:]) if fixed else ""
-    cleaned = maybe_cleanup(
-        fixed,
-        enabled=bool(cfg["cleanupEnabled"]),
-        model=cfg["cleanupModel"],
-        context=cfg["context"],
-        pairs=pairs,
-    )
-    if cleaned:
-        text = (cleaned[:1].upper() + cleaned[1:]) if cleaned else text
     if not raw:
         text = ""
     actual_device = getattr(model, "device", device)

@@ -17,4 +17,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
 base64 = "0.22"
 enigo = { version = "0.2", default-features = false, features = ["x11rb", "wayland"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+sha2 = "0.10"
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["metal"] }

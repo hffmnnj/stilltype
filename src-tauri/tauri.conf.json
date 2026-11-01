@@ -32,6 +32,7 @@
     "shortDescription": "Local-first silent dictation",
     "targets": "all",
     "resources": {
+      "licenses/*.txt": "licenses/",
       "../engine/*.py": "engine/",
       "../engine/requirements.txt": "engine/requirements.txt",
       "../engine/espnet/asr/*.py": "engine/espnet/asr/",

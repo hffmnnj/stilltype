@@ -35,12 +35,14 @@ struct Progress {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultData {
-    text: String,
+    pub text: String,
     raw: String,
     duration_ms: u64,
-    inference_ms: u64,
+    pub inference_ms: u64,
     frames: usize,
-    error: Option<String>,
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_warning: Option<String>,
     #[serde(default, skip_serializing)]
     pub device: Option<String>,
 }
@@ -319,7 +321,9 @@ pub fn transcribe(
         *worker = Some(Worker::spawn(data, resource, child_slot)?);
     }
     let id = Uuid::new_v4().to_string();
-    let request = json!({"id":id,"command":"transcribe","clipDir":clip,"final":final_,"settings":settings,"vocabulary":vocabulary});
+    let mut recognition_settings = settings.clone();
+    recognition_settings.cleanup_enabled = false;
+    let request = json!({"id":id,"command":"transcribe","clipDir":clip,"final":final_,"settings":recognition_settings,"vocabulary":vocabulary});
     let result = worker.as_mut().unwrap().request(request, &id);
     if result.is_err() {
         *worker = None;

@@ -1,4 +1,5 @@
 mod capture;
+mod cleanup;
 mod engine;
 mod state;
 use capture::{Clips, Frame};
@@ -33,6 +34,8 @@ struct Core {
     worker_child: Mutex<Option<Arc<Mutex<std::process::Child>>>>,
     device: Mutex<Option<String>>,
     installing: AtomicBool,
+    cleanup_installing: AtomicBool,
+    cleanup: Arc<Mutex<Option<cleanup::Runtime>>>,
 }
 fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
     m.lock().map_err(|_| "Internal lock failed".into())
@@ -185,6 +188,37 @@ async fn install_engine(
     .await
     .map_err(|e| e.to_string())?
 }
+struct CleanupInstallGuard(Arc<Core>);
+impl Drop for CleanupInstallGuard {
+    fn drop(&mut self) {
+        self.0.cleanup_installing.store(false, Ordering::Release);
+    }
+}
+#[tauri::command]
+fn cleanup_status(core: State<'_, Arc<Core>>) -> cleanup::Status {
+    cleanup::status(&core.data, &core.cleanup)
+}
+#[tauri::command]
+async fn install_cleanup(
+    app: tauri::AppHandle,
+    core: State<'_, Arc<Core>>,
+    accept_license: bool,
+) -> Result<cleanup::Status, String> {
+    if !accept_license {
+        return Err("Accept the model license before installation".into());
+    }
+    if core.cleanup_installing.swap(true, Ordering::AcqRel) {
+        return Err("Cleanup installation already in progress".into());
+    }
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = CleanupInstallGuard(core.clone());
+        cleanup::install(&app, &core.data, &core.cleanup)?;
+        Ok(cleanup::status(&core.data, &core.cleanup))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[tauri::command]
 fn start_clip(core: State<'_, Arc<Core>>) -> Result<String, String> {
     lock(&core.clips)?.start(&core.data.join("clips"))
@@ -215,7 +249,7 @@ async fn transcribe(
         (state.settings.clone(), state.vocabulary.clone())
     };
     tauri::async_runtime::spawn_blocking(move || {
-        let result = lock(&core.worker).and_then(|mut w| {
+        let mut result = lock(&core.worker).and_then(|mut w| {
             if core.installing.load(Ordering::Acquire) {
                 return Err("Engine installation is in progress".into());
             }
@@ -230,6 +264,24 @@ async fn transcribe(
                 &vocabulary,
             )
         });
+        if let Ok(result) = &mut result {
+            if settings.cleanup_enabled && result.error.is_none() && !result.text.trim().is_empty()
+            {
+                let started = std::time::Instant::now();
+                match cleanup::run(
+                    core.cleanup.clone(),
+                    core.data.clone(),
+                    settings.inference_device.clone(),
+                    result.text.clone(),
+                ) {
+                    Ok(text) => result.text = text,
+                    Err(error) => result.cleanup_warning = Some(error),
+                }
+                result.inference_ms = result
+                    .inference_ms
+                    .saturating_add(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+            }
+        }
         if let Ok(mut device) = core.device.lock() {
             *device = result
                 .as_ref()
@@ -287,30 +339,6 @@ async fn paste_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?
 }
-#[tauri::command]
-async fn ollama_models() -> Result<Vec<String>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get("http://127.0.0.1:11434/api/tags")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    let value: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    Ok(value
-        .get("models")
-        .and_then(|v| v.as_array())
-        .ok_or("Invalid Ollama response")?
-        .iter()
-        .filter_map(|v| v.get("name").and_then(|v| v.as_str()).map(str::to_owned))
-        .collect())
-}
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -355,6 +383,8 @@ fn main() {
                 worker_child: Mutex::new(None),
                 device: Mutex::new(None),
                 installing: AtomicBool::new(false),
+                cleanup_installing: AtomicBool::new(false),
+                cleanup: Arc::new(Mutex::new(None)),
             }));
             let show = MenuItem::with_id(app, "show", "Show Stilltype", true, None::<&str>)?;
             let dictate = MenuItem::with_id(app, "dictate", "Dictate", true, None::<&str>)?;
@@ -404,7 +434,8 @@ fn main() {
             cancel_clip,
             copy_text,
             paste_text,
-            ollama_models,
+            cleanup_status,
+            install_cleanup,
             export_data
         ])
         .build(tauri::generate_context!())

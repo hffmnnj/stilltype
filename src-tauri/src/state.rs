@@ -36,7 +36,7 @@ impl Default for Settings {
             keep_history: true,
             retention_days: 30,
             cleanup_enabled: false,
-            cleanup_model: "qwen3.5:4b".into(),
+            cleanup_model: "qwen3.5-0.8b-2026-q4".into(),
             pause_seconds: 0.7,
             beam_size: 5,
             inference_device: "auto".into(),

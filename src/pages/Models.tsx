@@ -1,11 +1,12 @@
 import { AlertTriangle, CheckCircle2, Download, RefreshCw } from 'lucide-react';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Dialog, DialogClose, DialogContent } from '../components/ui/dialog';
 import { Button, Notice, PageHeader, Segmented, Spinner } from '../components/ui/misc';
 import { Toggle } from '../components/ui/switch';
-import { api, errorMessage, isDesktop } from '../lib/api';
+import { api, errorMessage, isDesktop, listenNative } from '../lib/api';
+import type { InstallProgress } from '../lib/api';
 import { useStore } from '../lib/store';
-import type { Settings } from '../lib/types';
+import type { CleanupStatus, Settings } from '../lib/types';
 
 function Row({ label, value, ok }: { label: string; value: string; ok?: boolean }) {
   return (
@@ -161,57 +162,158 @@ function Compute() {
   );
 }
 
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return 'unknown size';
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(0)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 function Cleanup() {
   const { settings, updateSettings } = useStore();
-  const [models, setModels] = useState<string[] | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<CleanupStatus | null>(null);
+  const [busy, setBusy] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [progress, setProgress] = useState<InstallProgress | null>(null);
+  const [consent, setConsent] = useState(false);
+  const [agreed, setAgreed] = useState(false);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setBusy(true);
     setErr(null);
     try {
-      setModels(await api.ollamaModels());
+      setStatus(await api.cleanupStatus());
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
       setBusy(false);
     }
+  }, []);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    void listenNative<InstallProgress>('cleanup-install-progress', (p) => {
+      setProgress(p);
+      if (p.stage === 'error') setErr(p.message);
+    }).then((u) => {
+      if (cancelled) u();
+      else off = u;
+    });
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, []);
+
+  const install = async () => {
+    setInstalling(true);
+    setErr(null);
+    setProgress({ stage: 'runtime', message: 'Starting', progress: 0 });
+    try {
+      setStatus(await api.installCleanup(true));
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setInstalling(false);
+      setConsent(false);
+    }
   };
-  const options = models && !models.includes(settings.cleanupModel) ? [settings.cleanupModel, ...models] : models;
+
+  const ready = Boolean(status?.ready);
+  const pct = Math.round((progress?.progress ?? 0) * 100);
 
   return (
-    <section className="block" aria-labelledby="oll-h">
-      <h2 id="oll-h" className="section-title">Transcript cleanup</h2>
+    <section className="block" aria-labelledby="cleanup-h">
+      <div className="block-head">
+        <h2 id="cleanup-h" className="section-title">Transcript cleanup</h2>
+        <span className={`status ${ready ? 'status-ok' : 'status-idle'}`}>{busy || !status ? 'Checking' : ready ? 'Ready' : 'Not installed'}</span>
+      </div>
+      <p className="lede">
+        Tidies casing and punctuation on this device with a small bundled text model. The raw output is always kept.
+      </p>
+
+      {!isDesktop ? (
+        <Notice tone="warn">
+          Browser preview. The cleanup model installs and runs in the desktop app only.
+        </Notice>
+      ) : null}
+
+      <dl className="kvs">
+        <Row label="Engine" value={status ? (status.runtimeBundled ? 'Bundled (llama.cpp)' : 'Not bundled') : '…'} ok={status ? status.runtimeBundled : undefined} />
+        <Row label="Cleanup model" value={status?.modelId ?? '…'} />
+        <Row label="Download size" value={status ? formatBytes(status.totalBytes) : '…'} />
+        <Row label="Compute" value={status?.device ?? '…'} />
+      </dl>
+
+      {status?.error ? <Notice tone="error">{status.error}</Notice> : null}
+      {err ? (
+        <Notice tone="error" action={<Button onClick={() => void refresh()}>Retry</Button>}>{err}</Notice>
+      ) : null}
+
+      {installing || (progress && progress.stage !== 'ready' && progress.stage !== 'error' && !ready) ? (
+        <div className="progress-block">
+          <div className="progress-line">
+            <span>{progress?.message || 'Working'}</span>
+            <span className="mono">{pct}%</span>
+          </div>
+          <progress className="progress" max={100} value={pct} aria-label="Cleanup install progress" />
+        </div>
+      ) : null}
+
       <Toggle
         checked={settings.cleanupEnabled}
         onCheckedChange={(v) => void updateSettings({ cleanupEnabled: v })}
-        label="Tidy transcripts with Ollama"
-        hint="Optional. Fixes casing and punctuation using a model on your own machine. The raw output is always kept."
+        disabled={!ready}
+        label="Tidy transcripts after dictation"
+        hint={ready ? 'Fixes casing and punctuation locally after each transcript.' : 'Download the model below to turn this on.'}
       />
-      <div className="row">
-        <div className="row-text">
-          <label htmlFor="oll-model" className="row-label">Model</label>
-          <p className="row-hint">Only talks to Ollama at 127.0.0.1:11434 on this device.</p>
+
+      {!ready ? (
+        <div className="actions">
+          <Button variant="primary" disabled={!isDesktop || busy} busy={installing} onClick={() => { setAgreed(false); setConsent(true); }}>
+            <Download size={16} aria-hidden /> {installing ? 'Downloading…' : 'Download cleanup model'}
+          </Button>
+          {status ? <span className="muted small">About {formatBytes(status.totalBytes)}.</span> : null}
         </div>
-        <div className="inline">
-          {options && options.length > 0 ? (
-            <select id="oll-model" className="field select" value={settings.cleanupModel} onChange={(e) => void updateSettings({ cleanupModel: e.target.value })}>
-              {options.map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
-          ) : (
-            <input id="oll-model" className="field" value={settings.cleanupModel} readOnly aria-readonly />
-          )}
-          <Button onClick={() => void refresh()} busy={busy} disabled={!isDesktop}>
-            {!busy ? <RefreshCw size={15} aria-hidden /> : null} Refresh
+      ) : (
+        <div className="actions">
+          <Button onClick={() => void refresh()} busy={busy}>
+            {!busy ? <RefreshCw size={15} aria-hidden /> : null} Check again
           </Button>
         </div>
-      </div>
-      {models && models.length === 0 ? (
-        <Notice tone="warn">Ollama is running but has no models. Pull one with <code>ollama pull</code>.</Notice>
-      ) : null}
-      {err ? <Notice tone="error">{err}</Notice> : null}
-      {!isDesktop ? <p className="muted small">Model listing is available in the desktop app.</p> : null}
+      )}
+
+      <Dialog open={consent} onOpenChange={setConsent}>
+        <DialogContent
+          title="Download the cleanup model?"
+          description={`This downloads the text cleanup model${status ? ` (about ${formatBytes(status.totalBytes)})` : ''} and runs it on this device through the bundled engine. Nothing is uploaded.`}
+          footer={
+            <>
+              <DialogClose asChild><Button variant="ghost">Not now</Button></DialogClose>
+              <Button
+                variant="primary"
+                disabled={!agreed}
+                busy={installing}
+                onClick={() => void install()}
+              >
+                Accept and download
+              </Button>
+            </>
+          }
+        >
+          <label className="consent">
+            <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
+            <span>
+              I understand this downloads a text cleanup model to this device and runs it locally. Model weights follow their upstream Apache-2.0 terms.
+            </span>
+          </label>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

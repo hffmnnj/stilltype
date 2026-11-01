@@ -1,11 +1,15 @@
 import type {
   AppState,
   CapturedFrame,
+  CleanupStatus,
   DesktopApi,
   EngineStatus,
   HistoryEntry,
   InstallProgress,
+  OverlayAction,
+  OverlaySnapshot,
   Settings,
+  ShortcutStatus,
   TranscriptionResult,
   VocabularyWord,
 } from './types';
@@ -165,14 +169,73 @@ const browserApi: DesktopApi = {
   async pasteText() {
     throw new Error('Pasting into other apps needs the desktop app.');
   },
-  async ollamaModels() {
-    throw new Error('Listing Ollama models needs the desktop app, which talks to 127.0.0.1 for you.');
+  async cleanupStatus(): Promise<CleanupStatus> {
+    return {
+      runtimeBundled: false,
+      modelInstalled: false,
+      ready: false,
+      modelId: 'qwen3.5-0.8b-2026-q4',
+      device: 'Browser preview',
+      error: null,
+      totalBytes: 0,
+    };
+  },
+  async installCleanup() {
+    throw new Error('The text cleanup model installs and runs in the desktop app only.');
   },
   async exportData(format) {
     const state = await browserApi.getState();
     const out = buildExport(format, state);
     download(out.name, out.mime, out.body);
     return out.name;
+  },
+  async getOverlayState(): Promise<OverlaySnapshot> {
+    // Direct ?overlay preview in the browser: the same compact presentation
+    // as native with an honest readiness message. Read only the saved theme
+    // preference so the real UI theme carries over without touching
+    // history or the camera.
+    let theme: 'light' | 'dark' = 'light';
+    try {
+      const raw = window.localStorage.getItem(KEY.settings);
+      if (raw !== null) {
+        const stored = JSON.parse(raw) as { theme?: unknown };
+        if (stored.theme === 'light' || stored.theme === 'dark') {
+          theme = stored.theme;
+        } else {
+          theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+      } else {
+        theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+    } catch {
+      try {
+        theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      } catch {
+        theme = 'light';
+      }
+    }
+    return {
+      visible: false,
+      phase: 'ready',
+      elapsed: 0,
+      text: '',
+      message: 'Desktop app required',
+      cameraOpen: false,
+      theme,
+    };
+  },
+  async updateOverlay() {
+    /* No native window to update in the browser. */
+  },
+  async overlayAction(_action: OverlayAction) {
+    throw new Error('Overlay actions need the Stilltype desktop app.');
+  },
+  async shortcutStatus(): Promise<ShortcutStatus> {
+    return {
+      fnSupported: false,
+      fnActive: false,
+      message: 'System shortcuts and the Fn key need the desktop app. In this browser preview, dictate from the Dictate page.',
+    };
   },
 };
 
@@ -199,7 +262,12 @@ const desktopApi: DesktopApi = {
   cancelClip: (clipId) => invoke<void>('cancel_clip', { clipId }),
   copyText: (text) => invoke<void>('copy_text', { text }),
   pasteText: (text) => invoke<void>('paste_text', { text }),
-  ollamaModels: () => invoke<string[]>('ollama_models'),
+  cleanupStatus: () => invoke<CleanupStatus>('cleanup_status'),
+  installCleanup: (acceptLicense) => invoke<CleanupStatus>('install_cleanup', { acceptLicense }),
+  getOverlayState: () => invoke<OverlaySnapshot>('get_overlay_state'),
+  updateOverlay: (snapshot) => invoke<void>('update_overlay', { snapshot }),
+  overlayAction: (action) => invoke<void>('overlay_action', { action }),
+  shortcutStatus: () => invoke<ShortcutStatus>('shortcut_status'),
   async exportData(format) {
     // Native returns the rendered file contents; saving is done here.
     const body = await invoke<string>('export_data', { format });
