@@ -756,12 +756,173 @@ so no new held-out run or camera-path change was made. This tests the unchanged
 model on those pixels, not the potential of retraining with higher-resolution
 crops or a physical-phone pipeline.
 
+#### Expanded training set
+
+Using the remaining eligible training data helped where deeper training on the
+same 500 examples had not. The expanded set contains **878 utterances**: all 500
+original samples, referenced in place, plus 378 newly prepared complete-frame
+samples from the same twenty training videos. All sixty original/fresh evaluation
+text hashes and both evaluation source-video hashes were excluded before the
+run; only stored hashes, not evaluation words, were used for that exclusion.
+There were no overlaps or preparation failures. The contract manifest SHA-256 is
+`4de46d8051c7bfdd078f8efad9b2e32383182a86104b7b2079ebcdf3b8077264`.
+This is more data for the same participant, not a new population of speakers.
+
+The fixed twenty-epoch run started from the first-stage personal model, with seed
+20261113 and the same visual/CNN/bridge/decoder groups and paired augmentations as
+the deeper experiment. The coordinator ran the full training and development
+generation, verified finite nonzero gradients in all four selected groups and
+unchanged frozen state, then independently reloaded the resulting model and
+reproduced a complete development prediction and score.
+
+Raw silent-development errors fell from **71/161 to 46/161 = 28.57% WER**. That
+is 35.21% fewer than the first personal model and 65.15% fewer than the current
+INT8 development baseline. It is not a second halving of the 71 remaining errors,
+and **development performance is not held-out confirmation**. No development
+sentence was exact. Ordinary-speech development gave 22/170 errors, still worse
+than the original Base model's 20/170. Neither result justifies changing the
+general application model or bypassing its quiet-input checks.
+
+The changed-state SHA-256 is
+`430d067869f645c111e3f398ac039b695459f565dbb84561c59076c64e971e87`;
+the frozen silent-development prediction SHA-256 is
+`27ad5c1203f339ecebc2a2ae1e67ec64d9233cfce99060f91351d8112a81581e`.
+The unchanged production Qwen3.5 4B Intent policy again completed all twelve raw
+development inputs without fallback but left errors at **46/161**. It failed the
+fixed at-most-39 eligibility rule and received no new held-out Intent run.
+
+An independent rank-32/alpha-64 low-rank run started from the first-stage model
+and kept its original weights and buffers frozen. It adapted 180 attention and
+feed-forward linear weights across the twelve visual and six decoder blocks,
+using the same 878 examples for twenty epochs, seed 20261114, AdamW at 0.0001,
+accumulation eight and the same paired augmentations. Zero-initialized adapters
+preserved the original numerical output; first gradients reached the B matrices
+and then the A matrices after an update. Original-state and merged-target checks
+passed, and both twelve-clip generations completed without errors. Silent
+development gave **54/161** errors and ordinary-speech development **23/170**.
+Although eligible against the first-stage model, it lost to the expanded model's
+46/161, so it was not selected for fresh evaluation. This is an independent
+standard low-rank experiment, not a reproduction of a published personalized
+lipreading result. Its changed-state SHA-256 is
+`cb01a3247e1b7186e851f4617feabd5f9b675bc55a2a63500dc63bc3b0c3b44f`.
+
+#### Fresh silent-mouthing session
+
+The expanded model was selected on the original development set before any
+fresh reference scoring. The deeper 500-example and original-resolution
+candidates failed their development eligibility rule; the low-rank candidate
+lost the same development comparison. No fresh results were used to choose
+between them, and Intent was not applied to the fresh inputs.
+
+The new cohort uses `SoniSpeech_silent_eval` session 005: **a different recording
+session, not a different participant**. Of fifty records, forty-two passed the
+text, timestamp and actual-video-duration checks. After excluding known training
+and original evaluation text hashes, Python's `random.Random(20261111)` fixed
+twenty-four utterances, split into twelve test and twelve confirmation clips.
+All 2,853 raw frames were retained in the final 25 fps inputs; all twenty-four
+face/lip preparations succeeded, with 64–177 frames per input. The video SHA-256
+is `cc055b2f7d0e3a753d564b088ce8677ce87bef2b234b955611cf900a53b82a78`;
+the reference-free input manifest SHA-256 is
+`b72e27f9bac397a39628b8e87b1a0e2da3fc9eae59db77b7bdfad3bd4ebf3eb0`.
+
+Baseline and first-stage predictions were frozen before selection of the new
+model. The selected expanded model was strictly reloaded, matched its trained
+state groups and reproduced a stored development raw prediction and visual
+score before decoding these inputs. All fresh raw predictions were frozen before
+scoring. Current-model speech rejections remain in the denominator:
+
+| Host system | Test, 147 words | Confirmation, 164 words | Combined, 311 words |
+| --- | ---: | ---: | ---: |
+| Current desktop, joint beam 5 and existing gate | 146/147 = 99.32% | 164/164 = 100.00% | 310/311 = 99.68% |
+| Current INT8 CTC, evidence gate and desktop alignment | 129/147 = 87.76% | 138/164 = 84.15% | 267/311 = 85.85% |
+| First-stage personal model, ungated beam 50 | 89/147 = 60.54% | 94/164 = 57.32% | 183/311 = 58.84% |
+| Selected expanded personal model, ungated beam 50 | **46/147 = 31.29%** | **43/164 = 26.22%** | **89/311 = 28.62%** |
+
+The selected model cuts host INT8 word errors by **64.34% on test and 68.84% on
+confirmation**, meeting the first halving on both splits of this disclosed
+cohort. Combined errors fall **66.67%**, from 267 to 89. Against the first-stage
+personal model, combined errors fall **51.37%**, but the separate reductions are
+48.31% and 54.26%; that is not a second halving on both splits. A second halving
+relative to the original INT8 baseline would require at most 66 combined errors,
+not 89. The **10% WER target remains unmet**.
+
+Four of twenty-four expanded-model sentences were exact, two per split; none
+were exact for the other three systems. There were no preparation or inference
+errors for the INT8 or personal paths. Desktop returned explicit no-speech for
+ten test and all twelve confirmation clips. The frozen expanded prediction
+SHA-256 is
+`3b393c3fb34542ce63196da003d33ad515632f73797b65d12ec93e71d26f88b7`.
+
+This is **one-person, research-only, genuinely silent prompted-video evidence**,
+not a result on the user's Pixel, a population accuracy estimate or an original
+GRID halving. Reference text describes the prompted sentence, not independently
+verified word-by-word mouthing. Unknown pretraining overlap and the source's
+non-commercial terms still apply. The personal path is ungated; the application
+retains its existing quiet-input checks and models. These weights are not
+bundled in the delivered APK.
+
+#### Constrained-speech and quiet regression
+
+The selected expanded model was also run on all eighty original GRID speech
+clips and twenty-seven short quiet controls, reusing the existing complete
+MediaPipe face/lip preparations without changing their pixels or decoder. This
+was an ungated **host CPU** transfer regression, not Android-native preprocessing
+or another model-selection set:
+
+| Host model | Original development, 120 words | Original test, 120 words | Confirmation, 240 words |
+| --- | ---: | ---: | ---: |
+| Original Base, previous CUDA control | 88/120 = 73.33% | 83/120 = 69.17% | 171/240 = 71.25% |
+| Expanded personal model, CPU | 95/120 = 79.17% | 84/120 = 70.00% | 188/240 = 78.33% |
+
+All 107 inputs completed with finite scores and no preparation or inference
+failures. No speech sentence was exact. **All twenty-seven quiet controls still
+produced nonempty text.** The cross-device control is not a bit-parity comparison
+or proof that every score difference is caused by adaptation; it does establish
+that the selected model still performs poorly on this other-speaker corpus and
+does not meet the original GRID halving goal. Its one-person silent-speech gains
+do not justify a general model replacement or removing the application's quiet
+veto.
+
+An engineer ran the complete CPU batch. The coordinator checked every input and
+prediction identity, scored all retained examples, then independently reloaded
+the exact model state and reproduced one complete quiet raw output and visual
+score on CPU. The frozen prediction SHA-256 is
+`995ca79e1283cd035103001771c075e2c6220726c6c0ef8009d5407e0b35289f`.
+
+#### Development-only decoding follow-up
+
+After the session 005 evaluation was fixed, a separate CPU-only diagnostic
+generated fifty visual hypotheses for each of the twelve original development
+clips. All 600 hypotheses had finite scores and the complete trained state
+groups matched. Eleven normalized top-one texts matched CUDA; one near-tie
+swapped the first two candidates, whose CPU visual-score gap was 0.000141.
+The CPU raw control therefore had **47/161** errors rather than CUDA's 46/161.
+This is not bit-identical cross-device decoding.
+
+A fixed uniform word-edit medoid over all fifty hypotheses gave **44/161**
+errors. Separately, unchanged production Qwen3.5 4B Intent received each CPU
+top-one text plus up to four alternatives from its first five distinct visual
+hypotheses, with opaque IDs and no reference or external hints. It also gave
+**44/161**, retaining one raw fallback after the correction-limit guard rejected
+an output. The complete CPU correction process, including model load, took
+78.32 seconds; this excludes visual inference and capture. Both candidates
+failed the fixed at-most-39 development rule and received no new held-out run.
+
+Selecting the best hypothesis **with reference text** would give 34/161 errors
+within the first five, 27/161 within ten and 16/161 within fifty. These are
+nondeployable diagnostic lower bounds, **not measured recognition accuracy** or
+evidence that the 10% target has been reached. The frozen CPU candidate SHA-256
+is `f14fdb592faa324e69e7a5d248908b295ea9059b6cc97be63dd001632a31fb2d`;
+the Intent output SHA-256 is
+`60de285fd29b307fe1400a9b3c661e9816399d0d8899421090ed93f587f98648`.
+
 #### Reproduce the personal training recipe
 
-`tools/adapt_flare.py` exposes the fixed first-stage recipe without evaluation
+`tools/adapt_flare.py` exposes the fixed recipes without evaluation
 inputs or downloads. It requires CUDA, the trusted FLARE source revision and
 Python 3.10 dependencies listed under [portable utilities](#portable-flare-research-utilities),
-plus rights to your paired training material. Supply exactly 500 unique items
+plus rights to your paired training material. The default `top4` recipe takes
+exactly 500 unique items
 in a private JSON manifest with `schemaVersion: 1`; each item has an opaque `id`,
 a `sample` path and its paired `text`. Relative paths resolve from the manifest.
 Each NPZ contains only equal `face` and `lip` uint8 arrays `[T,96,96]`, with
@@ -774,9 +935,32 @@ new limit on two-minute application recordings.
   --training-manifest /private/training/manifest.json \
   --output /private/new-personal-model --accept-license
 
+# Continue from that top4 output with all 878 paired examples.
+"$EXPORT_PY" tools/adapt_flare.py --recipe visual \
+  --checkpoint /path/flare-base-finetuned.pt --source /path/trusted-FLARE \
+  --initial-adaptation /private/new-personal-model \
+  --initial-training-manifest /private/training/manifest.json \
+  --training-manifest /private/expanded/manifest.json \
+  --output /private/new-visual-personal-model --accept-license
+
 TMPDIR=/path/private-scratch python -m unittest discover -s tools \
   -p test_flare_adaptation.py -v
 ```
+
+The `visual` recipe requires exactly 878 unique items and preserves every initial
+500 item by ID, canonical sample path and normalized text. Both initial arguments
+are required for `visual` and rejected for `top4`. It verifies the local top4
+artifact's fixed filenames, checkpoint/source/tokenizer identities, manifest and
+state hashes before applying tensor-only partial weights with `weights_only=True`.
+Metadata and prior-state reads have independent byte limits and are checked as
+the same immutable bytes that are loaded. The pinned original checkpoint is
+also loaded from its verified in-memory snapshot rather than reopening its path;
+this retains about 2.13 GB of checkpoint bytes during startup and needs more host
+RAM than the earlier memory-mapped loader.
+Tensor keys, shapes, dtypes and finiteness are checked before state application.
+This establishes consistency with the supplied prior artifact, not independent
+authenticity. The twenty-epoch visual recipe and its training-only crop/flip are
+fixed; it is not an arbitrary training configuration interface.
 
 The tool refuses private inputs, weights or outputs inside Git working trees,
 existing output paths, duplicate identities/texts and invalid arrays. It checks
@@ -787,8 +971,19 @@ changed weights and provenance/gradient/state metadata. Labels and pixels are
 not copied into metadata or progress logs. A failed run can leave private partial
 weights, but no completed metadata; cleanup of a temporary file after successful
 publication is nonfatal. The supplied source remains trusted executable code,
-not a sandbox. Nine focused boundary tests pass, including input replacement
-during header checking and oversized declared-array refusal.
+not a sandbox. Thirteen focused boundary tests pass, including input replacement
+during header checking, oversized artifacts and checkpoint replacement before
+and after snapshot verification. The coordinator also applied the actual prior
+artifact on CPU and checked both complete state identities and the real
+500-to-878 item inclusion.
+
+The complete public `visual` CLI then ran all twenty epochs on the same ordered
+878 examples. Every epoch's mean/minimum/maximum loss and example count, every
+first gradient norm and every before/after state-group hash exactly matched the
+measured research run. The entire **683,991,223-byte** `changed-state.pt` was
+byte-identical, with the expanded-model SHA-256 recorded above. The real output
+directory was mode `0700` and both artifact files `0600`. This reproduces the
+training artifact; it does not add another independent accuracy dataset.
 
 The coordinator also ran the public CLI through all ten epochs on the same 500
 private examples, preserving their original order in the new manifest schema.
