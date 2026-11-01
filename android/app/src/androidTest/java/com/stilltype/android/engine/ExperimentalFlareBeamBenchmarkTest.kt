@@ -17,6 +17,7 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
 import java.security.MessageDigest
+import java.util.PriorityQueue
 import kotlin.math.exp
 import kotlin.math.ln
 import org.json.JSONArray
@@ -99,6 +100,11 @@ class ExperimentalFlareBeamBenchmarkTest {
         var crossMs = 0.0
         var decoderRunMs = 0.0
         var decoderLoopMs = 0.0
+        var cacheAllocationMs = 0.0
+        var tensorPreparationMs = 0.0
+        var outputCopyMs = 0.0
+        var candidateSelectionMs = 0.0
+        var parentStateUpdateMs = 0.0
         var decoderCalls = 0
         var maximumNativeRowBatch = 0
         var pssAfter = 0L
@@ -172,13 +178,16 @@ class ExperimentalFlareBeamBenchmarkTest {
                                             val batch = prefixes.size
                                             val length = prefixes[0].size
                                             assertTrue("Unexpected beam batch", batch == if (step == 0) 1 else beamSize)
+                                            val allocationStart = System.nanoTime()
                                             val logits = FloatArray(batch * VOCABULARY)
                                             val rowSize = HEADS * length * HEAD_DIM
                                             val pastRowSize = HEADS * (length - 1) * HEAD_DIM
                                             val present = suffixes.associateWith { FloatArray(batch * rowSize) }
+                                            cacheAllocationMs += elapsedMs(allocationStart)
                                             for (rowStart in 0 until batch step MAX_NATIVE_ROWS) {
                                                 val chunk = minOf(MAX_NATIVE_ROWS, batch - rowStart)
                                                 assertTrue("Unexpected decoder chunk size", chunk == 1 || chunk == MAX_NATIVE_ROWS)
+                                                val preparationStart = System.nanoTime()
                                                 Tensors().use { stepInputs ->
                                                     val tokenValues = LongArray(chunk * length) { prefixes[rowStart + it / length][it % length] }
                                                     val decoderFeeds = mutableMapOf(
@@ -191,23 +200,28 @@ class ExperimentalFlareBeamBenchmarkTest {
                                                         val chunkCache = cache.getValue(suffix).copyOfRange(rowStart * pastRowSize, (rowStart + chunk) * pastRowSize)
                                                         decoderFeeds["past_$suffix"] = stepInputs.add(floatTensor(environment, chunkCache, chunk, length - 1))
                                                     }
+                                                    tensorPreparationMs += elapsedMs(preparationStart)
                                                     start = System.nanoTime()
                                                     val result = decoder.run(decoderFeeds)
                                                     decoderRunMs += elapsedMs(start)
                                                     decoderCalls++
                                                     maximumNativeRowBatch = maxOf(maximumNativeRowBatch, chunk)
                                                     result.use {
+                                                        val copyStart = System.nanoTime()
                                                         copyFinite(output(result, "next_logits", OnnxJavaType.FLOAT, longArrayOf(chunk.toLong(), VOCABULARY.toLong())), "next_logits", logits, rowStart * VOCABULARY)
                                                         for (suffix in suffixes) {
                                                             val name = "present_$suffix"
                                                             copyFinite(output(result, name, OnnxJavaType.FLOAT, longArrayOf(chunk.toLong(), HEADS.toLong(), length.toLong(), HEAD_DIM.toLong())), name, present.getValue(suffix), rowStart * rowSize)
                                                         }
+                                                        outputCopyMs += elapsedMs(copyStart)
                                                     }
                                                 }
                                             }
                                             // Selection and cache reordering must see every row from the same step.
                                             cache = emptyMap()
+                                            val selectionStart = System.nanoTime()
                                             val candidates = bestCandidates(logits, cumulative, step, beamSize)
+                                            candidateSelectionMs += elapsedMs(selectionStart)
                                             val eosMask = BooleanArray(2 * beamSize) { j ->
                                                 candidates[j].word == EOS && candidates[j].score.isFinite() && (step == 0 || j >= beamSize || !ignored[j])
                                             }
@@ -228,6 +242,7 @@ class ExperimentalFlareBeamBenchmarkTest {
                                                 ignored = BooleanArray(beamSize) { ranks[selected[it]] >= 2 * beamSize }
                                                 assertTrue("All active beam candidates ignored", ignored.any { !it })
                                                 val selectedCandidates = selected.map { candidates[it] }
+                                                val updateStart = System.nanoTime()
                                                 prefixes = selectedCandidates.map { prefixes[it.parent] + it.word.toLong() }
                                                 cumulative = FloatArray(beamSize) { selectedCandidates[it].score }
                                                 cache = present.mapValues { (_, values) ->
@@ -237,6 +252,7 @@ class ExperimentalFlareBeamBenchmarkTest {
                                                         }
                                                     }
                                                 }
+                                                parentStateUpdateMs += elapsedMs(updateStart)
                                             }
                                             if (generated.isNotEmpty()) break
                                         }
@@ -270,6 +286,11 @@ class ExperimentalFlareBeamBenchmarkTest {
             .put("crossMs", crossMs)
             .put("nativeDecoderRunMs", decoderRunMs)
             .put("completeDecoderLoopMs", decoderLoopMs)
+            .put("cacheAllocationMs", cacheAllocationMs)
+            .put("tensorPreparationMs", tensorPreparationMs)
+            .put("outputCopyMs", outputCopyMs)
+            .put("candidateSelectionMs", candidateSelectionMs)
+            .put("parentStateUpdateMs", parentStateUpdateMs)
             .put("sampledPssBeforeKiB", pssBefore)
             .put("sampledPssAfterKiB", pssAfter)
             .put("excludes", "camera, preprocessing, model preparation, graph hashing; not a physical-phone claim")
@@ -283,8 +304,56 @@ class ExperimentalFlareBeamBenchmarkTest {
     private data class Candidate(val parent: Int, val word: Int, val score: Float, val flatIndex: Int)
     private data class Finalized(val score: Float, val tokens: List<Long>)
 
+    @Test
+    fun bestCandidates_rankAcrossRowsAndKeepFlatIndexTieOrder() {
+        val logits = FloatArray(3 * VOCABULARY)
+        for (word in 300 until 320) logits[2 * VOCABULARY + word] = 2f
+        for (word in 600 until 620) logits[2 * VOCABULARY + word] = 1f
+        val ranked = (300 until 320).toList() + (600 until 620).toList() +
+            (0 until VOCABULARY).filter { it != PAD && it !in 300 until 320 && it !in 600 until 620 }
+        for (beamSize in listOf(5, 50)) {
+            val candidates = bestCandidates(logits, floatArrayOf(-100f, -100f, 0f), 1, beamSize)
+            assertEquals(ranked.take(2 * beamSize).map { 2 * VOCABULARY + it }, candidates.map { it.flatIndex })
+            assertTrue(candidates.all { it.parent == 2 && it.word == it.flatIndex % VOCABULARY })
+            assertTrue(candidates.zipWithNext().all { (a, b) -> a.score >= b.score })
+        }
+    }
+
+    @Test
+    fun bestCandidates_equalScoresAcrossRowsUseGlobalFlatIndex() {
+        val logits = FloatArray(2 * VOCABULARY) { -100f }
+        for (row in 0 until 2) for (word in 10 until 17) logits[row * VOCABULARY + word] = 2f
+        val highest = (10 until 17).toList() + (1010 until 1017).toList()
+        val remaining = (0 until VOCABULARY).filter { it != PAD && it !in 10 until 17 }
+        for (beamSize in listOf(5, 50)) {
+            val candidates = bestCandidates(logits, floatArrayOf(0f, 0f), 1, beamSize)
+            assertEquals((highest + remaining).take(2 * beamSize), candidates.map { it.flatIndex })
+        }
+    }
+
+    @Test
+    fun bestCandidates_maskedAndNegativeInfinityScoresRemainStable() {
+        val logits = FloatArray(2 * VOCABULARY)
+        for (beamSize in listOf(5, 50)) {
+            val finite = bestCandidates(logits, floatArrayOf(0f, 0f), 0, beamSize)
+            assertEquals((0 until VOCABULARY).filter { it != PAD && it != EOS }.take(2 * beamSize), finite.map { it.flatIndex })
+            val infinite = bestCandidates(logits, floatArrayOf(Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY), 0, beamSize)
+            assertEquals((0 until 2 * beamSize).toList(), infinite.map { it.flatIndex })
+            assertTrue(infinite.all { it.score == Float.NEGATIVE_INFINITY })
+        }
+    }
+
     private fun bestCandidates(logits: FloatArray, cumulative: FloatArray, step: Int, beamSize: Int): List<Candidate> {
-        val best = mutableListOf<Candidate>()
+        val limit = 2 * beamSize
+        // The root is the lowest score, with the largest flat index losing ties.
+        val worstFirst = Comparator<Candidate> { a, b ->
+            when {
+                a.score < b.score -> -1
+                a.score > b.score -> 1
+                else -> b.flatIndex.compareTo(a.flatIndex)
+            }
+        }
+        val best = PriorityQueue(limit, worstFirst)
         for (row in cumulative.indices) {
             val offset = row * VOCABULARY
             var maximum = Float.NEGATIVE_INFINITY
@@ -296,14 +365,18 @@ class ExperimentalFlareBeamBenchmarkTest {
                 val score = if (word == PAD || (step == 0 && word == EOS)) Float.NEGATIVE_INFINITY
                 else (logits[offset + word] - maximum - logSum) + cumulative[row]
                 val flatIndex = offset + word
-                val candidate = Candidate(row, word, score, flatIndex)
-                val position = best.indexOfFirst { score > it.score || (score == it.score && flatIndex < it.flatIndex) }
-                if (position >= 0) best.add(position, candidate) else if (best.size < 2 * beamSize) best.add(candidate)
-                if (best.size > 2 * beamSize) best.removeAt(best.lastIndex)
+                val enters = if (best.size < limit) true else {
+                    val worst = best.element()
+                    score > worst.score || (score == worst.score && flatIndex < worst.flatIndex)
+                }
+                if (enters) {
+                    if (best.size == limit) best.remove()
+                    best.add(Candidate(row, word, score, flatIndex))
+                }
             }
         }
-        assertEquals(2 * beamSize, best.size)
-        return best
+        assertEquals(limit, best.size)
+        return best.sortedWith(worstFirst.reversed())
     }
 
     private fun floatTensor(environment: OrtEnvironment, values: FloatArray, batch: Int, length: Int): OnnxTensor =
