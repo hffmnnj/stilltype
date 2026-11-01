@@ -28,6 +28,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stilltype.android.core.MAX_SESSION_SECONDS
+import com.stilltype.android.core.RecognitionMode
 import com.stilltype.android.ui.AppViewModel
 import com.stilltype.android.ui.Sharing
 import com.stilltype.android.ui.capture.CapturePhase
@@ -39,7 +40,7 @@ import com.stilltype.android.ui.capture.RecordButton
 import com.stilltype.android.ui.capture.TranscriptPanel
 import com.stilltype.android.ui.capture.formatClock
 import com.stilltype.android.ui.capture.rememberCameraAccess
-import com.stilltype.android.ui.components.BusyRow
+import com.stilltype.android.ui.capture.ProcessingStatus
 import com.stilltype.android.ui.components.Panel
 import com.stilltype.android.ui.components.PrimaryButton
 import com.stilltype.android.ui.components.QuietButton
@@ -63,14 +64,18 @@ fun DictateScreen(
     val live by capture.live.collectAsStateWithLifecycle()
     val data by app.data.collectAsStateWithLifecycle()
     val model by app.modelStatus.collectAsStateWithLifecycle()
+    val quality by app.qualityModelStatus.collectAsStateWithLifecycle()
     val loading by app.loading.collectAsStateWithLifecycle()
     var pending by remember { mutableStateOf(Pending.RECORD) }
     val access = rememberCameraAccess {
         if (pending == Pending.RECORD) capture.start() else capture.setPreview(true)
     }
 
-    val ready = model.installed && !loading
     val busy = state.phase != CapturePhase.IDLE
+    // A running session keeps the mode it started with, whatever Settings says now.
+    val mode = if (busy) state.mode else data.settings.recognitionMode
+    val readiness = captureReadiness(mode, model, quality, loading)
+    val ready = readiness.ready
     val cameraActive = state.cameraOn && resumed
     val wide = isWide()
     val maxSecs = data.settings.maxClipSeconds.coerceIn(3, MAX_SESSION_SECONDS)
@@ -96,8 +101,9 @@ fun DictateScreen(
         ) {
             when {
                 !ready -> StageMessage(
-                    "Set up the model to record",
-                    "Recording stays off until recognition is ready on this device.",
+                    if (loading) "Loading" else readiness.headline,
+                    if (readiness.offerFast) readiness.detail
+                    else "Recording stays off until ${mode.label()} recognition is ready on this device.",
                 )
                 !access.granted && (access.denied || access.blocked) -> {
                     StageMessage("Camera access is off", "Stilltype reads lip movement from the camera. Nothing is stored as video.")
@@ -115,14 +121,20 @@ fun DictateScreen(
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatusChip(
-                    if (ready) "Model ready" else modelHeadline(model).first,
+                    if (ready) "${mode.label()} ready" else readiness.headline,
                     tone = if (ready) colors.success else colors.muted,
                 )
                 StatusChip(if (cameraActive) "Camera on" else "Camera off")
             }
-            if (!ready) {
+            if (!ready && readiness.offerFast) {
                 PrimaryButton(
-                    if (model.installed) "Loading" else "Open model setup",
+                    "Use Fast",
+                    { app.updateSettings(notify) { it.copy(recognitionMode = RecognitionMode.FAST) } },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else if (!ready) {
+                PrimaryButton(
+                    if (loading) "Loading" else "Open model setup",
                     onOpenModels,
                     enabled = !loading,
                     modifier = Modifier.fillMaxWidth(),
@@ -142,7 +154,7 @@ fun DictateScreen(
                         )
                         Text(
                             if (state.phase == CapturePhase.RECORDING) "${formatClock(state.elapsedMs)} of ${formatClock(state.limitMs)}"
-                            else limitLabel,
+                            else "${mode.label()} · $limitLabel",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.muted,
                         )
@@ -151,7 +163,7 @@ fun DictateScreen(
                     if (busy && state.phase != CapturePhase.PROCESSING) QuietButton("Cancel", capture::cancel)
                 }
             }
-            if (state.phase == CapturePhase.PROCESSING) BusyRow("Processing on this device")
+            if (state.phase == CapturePhase.PROCESSING) ProcessingStatus(state, onCancel = capture::cancel)
             state.failure?.let { failure ->
                 FailureNotice(failure, onDismiss = capture::clearFailure)
                 if (failure.kind == FailureKind.MODEL_MISSING) PrimaryButton("Open model setup", onOpenModels)

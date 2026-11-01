@@ -12,3 +12,10 @@ data class AlignmentFrame(
 
 /** Temporally aligned 96x96 crops, separate from the unchanged activity-gate ROI. */
 data class QualityCrops(val face: ByteArray, val lip: ByteArray)
+
+/** Owned by one accepted capture session, never shared with detector preview. */
+interface QualityFrameAccumulator : AutoCloseable {
+    fun offer(analysis: FrameAnalysis): List<MouthFrame>
+    fun finish(): List<MouthFrame>
+    fun reset()
+}

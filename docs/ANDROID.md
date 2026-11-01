@@ -1,9 +1,9 @@
 # Stilltype for Android (companion)
 
-Native Kotlin/Compose Material 3 companion to the desktop app. It mouths to
-text fully on-device: camera frames are aligned locally, then decoded by a
-CTC-only export of the desktop recognition checkpoint. No account, no network,
-no telemetry.
+Native Kotlin/Compose Material 3 companion to the desktop app. Camera frames
+are aligned and decoded fully on-device. **Fast** uses the compact USR2 CTC
+export; optional **Quality** uses the 2026 FLARE Base model with full beam-50
+decoding. No account, no network, no telemetry. Fast remains the default.
 
 > Status: no physical phone is attached. Host export/benchmark numbers below
 > are fixture smoke and latency measurements from a desktop host, not word
@@ -18,8 +18,8 @@ the Android companion.
 | | Desktop | Android |
 | --- | --- | --- |
 | Shell | Tauri 2 Rust shell + React frontend (`src/`, `src-tauri/`) | Native Kotlin, Compose Material 3 (`android/app/src/main/java/com/stilltype/android/`) |
-| Recognition | Private Python 3.12 worker over stdio (`engine/`), beam search, CUDA/MPS/CPU | On-device ONNX Runtime (`onnxruntime-android:1.24.3`), greedy CTC argmax in bounded 200-frame inference windows |
-| Face tracking | JS/WASM YuNet in the browser view | Same pinned `yunet-2026may.onnx` via ORT + OpenCV (`engine/FaceAnalyzer.kt`), per-frame affine warp — no temporal smoothing (desktop smooths landmarks over a centered 13-frame window in `engine/inference.py:align_mouths`) |
+| Recognition | Private Python 3.12 worker over stdio (`engine/`), beam search, CUDA/MPS/CPU | On-device ONNX Runtime (`onnxruntime-android:1.24.3`): Fast greedy CTC or optional Quality full beam 50, both in bounded 200-frame windows |
+| Face tracking | JS/WASM YuNet in the browser view | Same pinned YuNet via ORT + OpenCV. Fast retains per-frame mouth crops; Quality adds centered 13-observation face/lip alignment with at most six future observations |
 | Speech gate | Desktop motion gate | Capture requires faces in >= 50% of observed frames (`ui/capture/CaptureViewModel.kt`), then motion plus greedy CTC evidence for weak-motion windows (`engine/AndroidRecognizer.kt:activitySpans`) |
 | Compute setting | `settings.inferenceDevice` (`auto` \| `gpu` \| `cpu`) | `ComputeMode` (`AUTO` \| `CPU`) in the shared contract (`core/Contracts.kt`) |
 | Storage | Tauri app-data directory | Local DataStore `stilltype/state.json`, FileProvider export from `cacheDir/exports` |
@@ -127,6 +127,11 @@ A full build bundles generated assets by pointing at the export directory:
 ```sh
 ./gradlew assembleDebug -PmobileModelDir=/absolute/path/mobile-model
 # or: export STILLTYPE_MOBILE_MODEL_DIR=/absolute/path/mobile-model
+
+# Optional Quality assets, independently prepared and consented in the app:
+./gradlew assembleDebug -PmobileModelDir=/absolute/path/mobile-model \
+  -PqualityModelDir=/absolute/path/quality-pack
+# or: export STILLTYPE_QUALITY_MODEL_DIR=/absolute/path/quality-pack
 ```
 
 `stageBundledModels` copies exactly `manifest.json`, `usr2-ctc-int8.onnx`,
@@ -140,6 +145,90 @@ SHA, frame geometry, token ids, file sizes/hashes) and installation is
 explicit — `prepareBundled()` runs only after UI consent, never on launch,
 and never opens the camera. Debug APKs keep `arm64-v8a` + `x86_64` ABIs
 (ORT/OpenCV ship both; duplicate `libc++_shared.so` is deduplicated).
+
+### Optional Quality pack
+
+Quality is a separate **non-commercial research-model option**, not an upgrade
+to the MIT app license or an automatic replacement for Fast. It requires an
+8 GB-class device: Android must report at least 6 GiB usable physical RAM after
+reservations. Unsupported devices keep Fast available and cannot prepare or
+start Quality. Runtime low-memory status also refuses a new Quality run. This
+guard does not guarantee that every supported device has enough free memory.
+
+Generate the full beam-50 export and compact graphs with the commands in
+[RECOGNITION.md](RECOGNITION.md#full-beam-search-with-bounded-execution-rows),
+then generate the matching helpers with `tools/export_flare_cache.py
+--beam-size 50`. Put these seven files in one directory outside Git:
+
+```text
+metadata.json       cache.json
+encoder.onnx        cross.onnx        decoder-beam.onnx
+cache-gather.onnx   cache-merge.onnx
+```
+
+The compact weighted graphs and helpers total **338,114,514 bytes**. Compact
+storage is not a lower-runtime-memory claim. `stageQualityModels` includes only
+these seven names; an unset property uses a separate empty asset root, while a
+supplied incomplete pack fails the build. Never commit the graphs.
+
+In **Models**, review the separate CC-BY-NC-4.0 terms and explicitly prepare
+Quality. Copies are checked against bounded metadata, fixed names, byte counts
+and SHA-256 before an installation marker is written. Then select Quality in
+**Settings → Recognition**. The Fast pack is still required: every window must
+pass its activity check and produce nonblank Fast text before Quality can decode.
+Explicit no-speech and blank-Fast windows are conservatively omitted; other gate
+or decoder errors fail the session instead of silently substituting Fast.
+
+Quality keeps the two-minute limit. The capture owner flushes delayed centered
+crops on Stop, releases its frame list when processing starts, and reports real
+completed-window progress. Cancel, navigation and backgrounding invalidate an
+unfinished session. Completion publishes the result atomically before its
+asynchronous history save; a completed dictation is not revoked by a later
+navigation or cancel. An older save cannot repaint a newer session. ONNX calls
+are not interruptible mid-call, so cancellation is checked between native calls
+and windows. Main capture and the compact shortcut sheet use the same owner.
+
+Auto requests NNAPI for the Quality **encoder only**; cross projections, beam
+decoding and cache helpers use CPU. Each result reports observed or unverified
+encoder execution separately from the CPU decoder. NNAPI is not a GPU/NPU
+guarantee. Quality does not add a language-model cleanup step or network access.
+
+Coordinator-run API 36 x86_64 emulator QA, two virtual cores, **8 GiB guest RAM**
+and four ORT threads, exercised the actual combined Fast-veto/Quality decoder:
+
+| Prepared-crop journey | Result |
+| --- | --- |
+| 129-frame / 5.12-second speech, CPU | Exact independent raw reference; 19,135 ms processing wall time |
+| Same speech, Auto | Exact reference; observed CPU encoder and CPU decoder; 20,157 ms |
+| Weak-motion quiet, 23 frames | `no-speech`, empty text, Quality decoder not run; 456 ms |
+| Cancel after first completed window | Cancelled without returning a late recognition result |
+| 3,001 independently copied frames / 120 seconds | All 16 windows completed; 417,069 ms processing wall time |
+
+The full-session Java-heap sample was 151,802,048 bytes; sampled PSS with models
+open was 2,769,100 KiB. Neither is peak memory. These timings include model
+loading, activity gating, input normalization and decoding, but exclude camera,
+capture and model preparation. They are **not Pixel speed or camera-to-text
+measurements**. A preceding full-session run on a 3 GiB emulator was killed by
+Android for low memory, motivating the explicit hardware guard rather than a
+larger application heap. That guard passed refusal QA on the 3 GiB emulator
+without loading either model or altering existing Quality files.
+
+`QualityRecognitionBenchmarkTest` contains the real-model speech, quiet,
+Auto, cancellation and full-session checks. It reads private `quality-recognition/`
+mouth/face/lip byte arrays and a manifest with timestamps and an independently
+generated raw reference; quiet crops use the earlier activity-gate fixture.
+Build and install both matching APKs, transfer those private fixtures, then run:
+
+```sh
+adb shell am instrument -w -r \
+  -e class com.stilltype.android.engine.QualityRecognitionBenchmarkTest \
+  com.stilltype.android.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The APK includes [FLARE attribution](../android/app/src/main/assets/licenses/FLARE-NOTICE.txt)
+and the complete model license. These are exports of released trained weights,
+not newly trained models. Host raw WER comparisons and their caption/training-
+overlap limits are in [RECOGNITION.md](RECOGNITION.md#two-additional-speakers).
 
 ## Permissions and data
 
@@ -254,7 +343,9 @@ correct words: the short fixture still had 5 word errors out of 6. The Pixel
 research FLARE exports directly through the pinned Android ONNX Runtime. It is
 **not** an application model switch, camera test, GPU test or phone accuracy
 benchmark. These graphs are not bundled in the APK; the model's CC-BY-NC-4.0
-terms still apply. See [RECOGNITION.md](RECOGNITION.md#portable-flare-research-utilities)
+terms still apply. The following standalone benchmarks preceded the optional
+Quality integration above; their historical timings are not current app latency.
+See [RECOGNITION.md](RECOGNITION.md#portable-flare-research-utilities)
 for the exporter, trusted-source requirements and separate Python environments.
 
 After exporting, `tools/benchmark_flare.py` prepares a private directory with
@@ -303,7 +394,7 @@ memory. Stage timings exclude camera, face processing, fixture transfer and
 graph hashing; the complete test includes its validation/setup work. This
 demonstrates native graph compatibility, not the user's camera-to-text wait on
 a Pixel. Greedy decoding also had worse host WER than the research beam-50
-decoder, so the current app model remains unchanged.
+decoder; that experiment did not change the app's default.
 
 ### Cached decoder benchmark
 
@@ -382,8 +473,7 @@ evaluation was running concurrently, so comparison with earlier greedy timings
 is not a controlled speed comparison. The stage timings exclude camera,
 preprocessing, model preparation and graph hashing. This proves native cached
 beam execution and token parity, **not** camera-to-text latency, physical Pixel
-acceleration or beam-50 accuracy. The application and delivered APK retain their
-existing model.
+acceleration or beam-50 accuracy. That experiment did not switch the app model.
 
 ### Compact graph compatibility
 
@@ -401,7 +491,7 @@ complete beam loop 1,856 ms. Those are compatibility-run stage timings, not a
 controlled speed comparison or camera-to-text latency. Sampled process PSS was
 1,290,081 KiB after decoding: **no memory reduction is claimed**. The emulator
 was stopped after the check. Physical Pixel and camera-path compatibility remain
-unverified, and the delivered APK still uses the existing model.
+unverified by that standalone benchmark.
 
 ### Full beam with bounded native batches
 
@@ -440,7 +530,7 @@ pinned-output optimization exceeded this emulator's 192 MiB Java heap and was
 removed. The successful short fixtures do not prove all 128-prefix outputs fit.
 Moving cache handling into native graph operations is the next experiment;
 neither raising heap limits nor dropping finite checks is a shipped fix.
-The application and delivered APK still use the existing recognition engine.
+The later native-cache implementation below addresses the Java-cache limitation.
 
 ### Native cache helper graphs
 
@@ -464,7 +554,7 @@ checks **all rows**, not only selected survivors.
 Coordinator host ORT tests verified exact NumPy parity, empty chunks/indices,
 prefix length 128, and rejection of NaN and either infinity in an unselected
 row. No weights are included; the helpers do not change the underlying
-checkpoint's non-commercial terms or the application's default engine.
+checkpoint's non-commercial terms or the application's Fast default.
 
 ### Native-owned beam caches
 
@@ -473,7 +563,7 @@ Gathered tensors are borrowed through each decoder call; all decoder chunk
 results remain live until merge. The old cache closes only after the new cache
 passes the all-row finite check. Java receives vocabulary logits and the scalar
 finite flag, not the full cache arrays. Cancellation and exception paths close
-the same owners. This is a CPU-only experimental module, not app wiring.
+the same owners. Quality uses this cache ownership; its decoder remains CPU-only.
 
 For direct QA, copy the three weighted graphs and `metadata.json`, the matching
 helper graphs and `cache.json`, and the numeric fixture's `face.f32`, `lip.f32`
@@ -504,7 +594,7 @@ memory measurement. No physical Pixel, GPU or lower total-memory claim is made.
 
 ### Bounded centered capture alignment
 
-`CenteredFaceAligner` provides the full-face/lip crops for a prospective Quality
+`CenteredFaceAligner` provides the full-face/lip crops for the optional Quality
 path without changing the Fast activity-gate ROI. It uses up to six future
 observations and retains at most 13 grayscale frames, not a full-resolution
 two-minute recording. Emitted frames retain the original timestamp and exact
@@ -516,7 +606,7 @@ references without emitting them.
 Face analysis supplies the additional grayscale/landmark payload only when
 explicitly requested. Default analysis does not allocate it. A real detector
 test verified byte-identical Fast crops and that later calls cannot mutate an
-accepted payload. The application does not request Quality capture yet.
+accepted payload. The application requests this payload only for Quality capture.
 
 Prepare a reference-free fixture from a short prepared clip:
 
@@ -544,9 +634,8 @@ frames**, including separate gap segments, to the independent full-clip referenc
 A 3,001-frame / 120,000 ms synthetic journey retained at most 13 input frames,
 preserved all timestamps and flushed every tail frame; reset emitted no stale
 frames. The public fixture tool reproduced all seven native-tested binary
-hashes exactly. This establishes these preprocessing and buffering checks,
-not physical-camera accuracy, general silent-mouthing performance, or a new
-downloadable application engine.
+hashes exactly. This establishes preprocessing and buffering behavior,
+not physical-camera accuracy or general silent-mouthing performance.
 
 ## Compute notes
 
