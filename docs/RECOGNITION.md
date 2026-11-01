@@ -975,9 +975,15 @@ not a sandbox. Thirteen focused boundary tests pass, including input replacement
 during header checking, oversized artifacts and checkpoint replacement before
 and after snapshot verification. The coordinator also applied the actual prior
 artifact on CPU and checked both complete state identities and the real
-500-to-878 item inclusion. Full public `visual` training reproduction remains
-unverified until its complete run is recorded; the scores above identify the
-completed fixed research run.
+500-to-878 item inclusion.
+
+The complete public `visual` CLI then ran all twenty epochs on the same ordered
+878 examples. Every epoch's mean/minimum/maximum loss and example count, every
+first gradient norm and every before/after state-group hash exactly matched the
+measured research run. The entire **683,991,223-byte** `changed-state.pt` was
+byte-identical, with the expanded-model SHA-256 recorded above. The real output
+directory was mode `0700` and both artifact files `0600`. This reproduces the
+training artifact; it does not add another independent accuracy dataset.
 
 The coordinator also ran the public CLI through all ten epochs on the same 500
 private examples, preserving their original order in the new manifest schema.
