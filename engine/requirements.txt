@@ -1,0 +1,12 @@
+# Stilltype engine inference dependencies, pinned to mutually compatible
+# releases with Python 3.12 wheels. Installed with uv; Rust invokes
+# `uv pip install -r engine/requirements.txt --torch-backend auto` so GPU
+# machines get a CUDA-capable torch build (macOS gets the MPS-capable
+# standard build) while CPU-only machines fall back to the CPU build.
+# CPU inference is a device mode using the same USR2 checkpoint, not a
+# separate model.
+torch==2.7.1
+numpy==2.1.3
+opencv-python-headless==4.11.0.86
+six==1.17.0
+gdown==5.2.2
