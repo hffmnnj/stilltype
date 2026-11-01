@@ -502,6 +502,52 @@ unselected row. The largest Java-heap sample while the full cache was live was
 The ordinary recognition fixture's after-close PSS sample is not a runtime-
 memory measurement. No physical Pixel, GPU or lower total-memory claim is made.
 
+### Bounded centered capture alignment
+
+`CenteredFaceAligner` provides the full-face/lip crops for a prospective Quality
+path without changing the Fast activity-gate ROI. It uses up to six future
+observations and retains at most 13 grayscale frames, not a full-resolution
+two-minute recording. Emitted frames retain the original timestamp and exact
+Fast pixel-array reference. Missing or invalid mouth/alignment pairs end a
+segment and flush its tail; unlike desktop's offline pipeline, gaps are not
+interpolated. `finish` flushes every delayed crop; reset/cancel drops pending
+references without emitting them.
+
+Face analysis supplies the additional grayscale/landmark payload only when
+explicitly requested. Default analysis does not allocate it. A real detector
+test verified byte-identical Fast crops and that later calls cannot mutate an
+accepted payload. The application does not request Quality capture yet.
+
+Prepare a reference-free fixture from a short prepared clip:
+
+```sh
+python tools/prepare_alignment_fixture.py --clip-dir /path/prepared-clip \
+  --output /path/new-alignment-fixture
+```
+
+The tool uses NumPy/OpenCV and the existing desktop `align_mouths` reference,
+rejects clips over 200 frames, and selects at least 30 consecutive face frames.
+It writes grayscale inputs, little-endian landmarks/reference points, independent
+full-clip and split-segment expected crops, and a size/hash manifest. Keep the
+eight output files outside Git and copy them into app-private
+`files/quality-alignment/`. The detector regression also requires the bundled
+Fast model. Build/install the matching app and test APKs, then run:
+
+```sh
+adb shell am instrument -w -r \
+  -e class com.stilltype.android.engine.CenteredFaceAlignerTest \
+  com.stilltype.android.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Coordinator API 36 emulator QA matched **every face and lip pixel on all 129
+frames**, including separate gap segments, to the independent full-clip reference.
+A 3,001-frame / 120,000 ms synthetic journey retained at most 13 input frames,
+preserved all timestamps and flushed every tail frame; reset emitted no stale
+frames. The public fixture tool reproduced all seven native-tested binary
+hashes exactly. This establishes these preprocessing and buffering checks,
+not physical-camera accuracy, general silent-mouthing performance, or a new
+downloadable application engine.
+
 ## Compute notes
 
 `AUTO` requests NNAPI with `CPU_DISABLED`, excluding NNAPI's reference CPU
