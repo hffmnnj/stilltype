@@ -586,6 +586,72 @@ became a default. Their frozen JSONL SHA-256 values are, respectively,
 `51c5701cf1428c243ab6464f29cc9c4b3db972131b7e2a317ce6a2ac7f0bc638`, and
 `b71b4da23abd1f257c36117ad023c5adf2ce566477e746d086c33fa92a619461`.
 
+### Genuine silent-mouthing diagnostic
+
+The [2026 SoniSpeech paper](https://arxiv.org/html/2608.00803) explicitly defines
+its silent mode as mouthing **without vocalization or whispering**. The
+[Cornell release](https://doi.org/10.7298/xjjr-9m85) licenses the corpus under
+CC-BY-NC-4.0. This is a better task match than muting an ordinary speech video,
+but has one fluent non-native English-speaking participant, an author of the
+paper. No separate participant-consent statement was located in the primary
+materials. The release license is the stated research-use permission; no private
+consent document or broader population coverage is inferred from it.
+
+The paper's 26.3% baseline uses wearable ultrasound echo profiles, **not RGB
+lipreading**. A phone camera cannot inherit that result without the sensing
+hardware. This comparison uses frontal video only, never ultrasound or audio.
+
+Only `SoniSpeech_silent_eval/session_011/video.mp4` and its transcript were extracted from
+archive 1 using exact HTTP byte ranges and ZIP CRC validation, not an 8.6 GB
+archive download. The actual video is color 1920×1080 H.264 at 30 fps, lasting
+381.7 seconds. The source SHA-256 is
+`46de300b7accf7e7d46f9e9c7dec220039b4332e4bb4958dbdd0a94977972169`.
+Utterance-ID overlays matched three inspected start/middle/end ranges; this
+supports the time origin, not independently verified word-level alignment.
+References are the prompted sentences, not human verification of every word
+actually mouthed. Training overlap remains unknown.
+
+Before recognition, eligibility required at least four normalized words, a
+0.8–7.8-second interval fully inside the video, and no reference-based difficulty
+selection. Of 50 records, 43 qualified. Python's `random.Random(20261106)` sampled
+36 sorted eligible IDs, assigned the first 12 to development, the next 12 to
+test and the last 12 to confirmation, then sorted within each split by time.
+The local manifest SHA-256 is
+`39ed4e359e84a55dbbdd67997f6e561e3f185ad5bd87e0ca4d526452b167c051`.
+These splits share one speaker and session; they are not speaker-independent.
+All 4,195 prepared raw frames were retained in the final centered face/lip
+arrays, with no failed preparation or 200-frame truncation. An initial resampled
+copy that lost one frame in six clips was not used for these model comparisons.
+
+Each model received only the twelve development pixel inputs. Raw files were
+frozen before their scoring, and failures remain in the denominator:
+
+| Host visual-only system | Development errors / 161 words | Inference failures |
+| --- | ---: | ---: |
+| Current desktop, joint beam 5 and existing gate | 156/161 = 96.89% | 11/12 `no-speech` |
+| Current INT8 CTC, evidence gate and desktop alignment | 132/161 = 81.99% | 0/12 |
+| FLARE Base, ungated beam 50 | 130/161 = 80.75% | 0/12 |
+| Adapted Base visual LLM, ungated greedy | 112/161 = 69.57% | 0/12 |
+| FLARE Large, ungated beam 50 | 118/161 = 73.29% | 0/12 |
+| Adapted Large visual LLM, ungated greedy | 131/161 = 81.37% | 0/12 |
+
+No system recognized a complete development sentence exactly. The best result
+has only **15.15% fewer errors** than the current host INT8 baseline, not a
+halving or near-90% recognition. All candidates failed the predeclared rule of
+at least 25% fewer development errors than both current baselines, so no candidate
+received a new locked test/confirmation run. The larger model was not selected.
+The coordinator independently reproduced both Base and Large adapted models'
+first raw prediction and natural EOS with the public native runner.
+
+The Large stage-3 artifact was separately pinned to
+`lipreading_exp_2_large_face_lip_s2/checkpoints/checkpoint_4_60000.pt`, 622,244,623
+bytes, SHA-256 `412a92e1591a5365f53f3e968c83925b4a97b0cc9c8846690736b58dffe0c4c4`.
+Its projection takes 768-dimensional encoder features; all 394 converted LoRA
+tensors matched the source bit-for-bit. Like the Base adaptation, its internal
+training encoder identity is unresolved, and the older quantized 7B base differs
+from the training representation. These are approximate research runs, not
+paper parity, Android results, or grounds for an ungated default switch.
+
 ### Rejected sampling change
 
 A timestamp-aware sampler reproduced the original prepared pixels before
