@@ -58,9 +58,14 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.clickable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.LinearProgressIndicator
+import com.stilltype.android.core.RecognitionMode
+import com.stilltype.android.ui.components.BusyRow
 import com.stilltype.android.ui.components.InlineError
+import com.stilltype.android.ui.components.QuietButton
 import com.stilltype.android.ui.components.Rule
 import com.stilltype.android.ui.components.StatusChip
+import com.stilltype.android.ui.screens.label
 import com.stilltype.android.ui.theme.MonoFamily
 import com.stilltype.android.ui.theme.StilltypeTheme
 
@@ -305,13 +310,52 @@ fun TranscriptPanel(
 fun RecognitionDetails(result: CaptureResult, modifier: Modifier = Modifier) {
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         DetailLine("Raw output", result.raw.ifBlank { "(empty)" }, mono = false)
-        DetailLine("Inference", "${result.inferenceMs} ms on ${result.backend.ifBlank { "CPU" }}")
+        val quality = result.mode == RecognitionMode.QUALITY
+        DetailLine("Mode", result.mode.label(), mono = false)
+        // Quality time covers gating, preprocessing and decoding, not just native calls.
+        DetailLine(if (quality) "Processing time" else "Inference", "${formatDuration(result.inferenceMs)} on ${result.backend.ifBlank { "CPU" }}")
         DetailLine("Clip", "${formatClock(result.durationMs)} · ${result.frames} mouth frames")
         Text(
-            "Experimental CTC/INT8 export of the 2026 USR2 weights. Not equal to desktop beam-search accuracy.",
+            if (quality) {
+                "Experimental full beam50 decoding of the 2026 FLARE Base model, exported for this device and not newly trained. Weights are CC-BY-NC-4.0: non-commercial use only."
+            } else {
+                "Experimental optimized CTC/INT8 export of the 2026 USR2 weights. Not equal to desktop beam-search accuracy."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = StilltypeTheme.colors.muted,
         )
+    }
+}
+
+private fun formatDuration(ms: Long): String = if (ms >= 10_000) "%.1f s".format(ms / 1000.0) else "$ms ms"
+
+/**
+ * Processing state with a real way out. Quality shows completed model windows
+ * only once the engine reports them; Fast has no per-window signal.
+ */
+@Composable
+fun ProcessingStatus(state: CaptureState, onCancel: () -> Unit, modifier: Modifier = Modifier) {
+    val colors = StilltypeTheme.colors
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        val progress = state.progress
+        if (state.mode == RecognitionMode.QUALITY) {
+            if (progress != null && progress.totalWindows > 0) {
+                val fraction = (progress.completedWindows.toFloat() / progress.totalWindows).coerceIn(0f, 1f)
+                val label = "Quality: ${progress.completedWindows} of ${progress.totalWindows} windows"
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = label },
+                    color = MaterialTheme.colorScheme.onSurface,
+                    trackColor = colors.hairline,
+                )
+                Text(label, style = MaterialTheme.typography.bodySmall, color = colors.muted)
+            } else {
+                BusyRow("Quality: starting first window")
+            }
+        } else {
+            BusyRow("Processing on this device")
+        }
+        QuietButton("Cancel", onCancel)
     }
 }
 

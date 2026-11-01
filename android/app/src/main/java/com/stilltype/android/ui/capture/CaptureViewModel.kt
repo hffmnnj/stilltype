@@ -11,13 +11,23 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.stilltype.android.StilltypeApplication
+import com.stilltype.android.core.AppRepository
+import com.stilltype.android.core.ModelRepository
+import com.stilltype.android.core.QualityModelRepository
+import com.stilltype.android.core.VisualRecognizer
+import com.stilltype.android.core.FrameAnalysis
 import com.stilltype.android.core.HistoryEntry
 import com.stilltype.android.core.MAX_SESSION_FRAMES
 import com.stilltype.android.core.MAX_SESSION_SECONDS
 import com.stilltype.android.core.MouthFrame
+import com.stilltype.android.core.QualityFrameAccumulator
+import com.stilltype.android.core.RecognitionMode
+import com.stilltype.android.core.RecognitionProgress
 import com.stilltype.android.data.TextRules
+import com.stilltype.android.data.checkQualityMemory
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -43,10 +53,16 @@ data class CaptureResult(
     val backend: String,
     val saved: Boolean,
     val copied: Boolean,
+    /** Mode the session started in, so a later settings change cannot relabel it. */
+    val mode: RecognitionMode = RecognitionMode.FAST,
 )
 
 data class CaptureState(
     val phase: CapturePhase = CapturePhase.IDLE,
+    /** Mode snapshotted at start; valid while a session is active. */
+    val mode: RecognitionMode = RecognitionMode.FAST,
+    /** Real window progress while a Quality session processes; null until the first window completes. */
+    val progress: RecognitionProgress? = null,
     /** True while a camera owner should be bound (preview or capture). */
     val cameraOn: Boolean = false,
     val elapsedMs: Long = 0,
@@ -71,14 +87,31 @@ interface FrameSink {
     fun onCameraError(session: Long, message: String)
 }
 
+/** Collaborators the capture owner needs; resolved lazily so creating the view model stays cheap. */
+interface CaptureDependencies {
+    val repository: AppRepository
+    val models: ModelRepository
+    val qualityModels: QualityModelRepository
+    val recognizer: VisualRecognizer
+}
+
+private class ApplicationDependencies(private val app: StilltypeApplication) : CaptureDependencies {
+    override val repository: AppRepository get() = app.repository
+    override val models: ModelRepository get() = app.models
+    override val qualityModels: QualityModelRepository get() = app.qualityModels
+    override val recognizer: VisualRecognizer get() = app.recognizer
+}
+
 /**
  * Single capture owner shared by the main screen and the quick-capture sheet.
  * Every async step carries the session token that started it. Cancel, pause and
  * restart bump the token, so a late frame or recognition result is dropped
  * without saving, copying or displaying anything.
  */
-class CaptureViewModel(application: Application) : AndroidViewModel(application), FrameSink {
-    private val app = application as StilltypeApplication
+class CaptureViewModel @JvmOverloads constructor(
+    application: Application,
+    private val deps: CaptureDependencies = ApplicationDependencies(application as StilltypeApplication),
+) : AndroidViewModel(application), FrameSink {
     private val lock = Any()
 
     private val _state = MutableStateFlow(CaptureState())
@@ -91,6 +124,16 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     override val session: Long get() = token
 
     private val frames = ArrayList<MouthFrame>()
+
+    /** Session-owned; touched only under [lock] and closed on stop, cancel and clear. */
+    private var accumulator: QualityFrameAccumulator? = null
+    private var sessionMode = RecognitionMode.FAST
+
+    /** Accepted mouths fed to the accumulator. Outputs lag by up to six frames, so [frames] cannot enforce the cap. */
+    private var acceptedInputs = 0
+
+    /** True only for an accepted Quality session; lets the analyzer thread pick the analysis path without the lock. */
+    @Volatile private var qualityCapture = false
     private var observed = 0
     private var withFace = 0
     private var recordStartMs = 0L
@@ -101,8 +144,37 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     /** Starts capture. Returns false when one is already running. */
     fun start(): Boolean {
-        val settings = app.repository.state.value.settings
-        if (app.models.installedModels() == null) {
+        val settings = deps.repository.state.value.settings
+        val mode = settings.recognitionMode
+        if (mode == RecognitionMode.QUALITY) {
+            val memory = checkQualityMemory(getApplication<Application>())
+            if (memory.unavailableReason != null) {
+                _state.update {
+                    it.copy(
+                        failure = CaptureFailure(
+                            FailureKind.FAILED,
+                            "Quality unavailable",
+                            "${memory.unavailableReason} Switch to Fast in Settings.",
+                        ),
+                    )
+                }
+                return false
+            }
+            if (memory.lowMemory) {
+                _state.update {
+                    it.copy(
+                        failure = CaptureFailure(
+                            FailureKind.FAILED,
+                            "Not enough free memory",
+                            "Close other apps and try again, or use Fast.",
+                        ),
+                    )
+                }
+                return false
+            }
+        }
+        // Fast always runs: it is the quiet/activity veto even for Quality sessions.
+        if (deps.models.installedModels() == null) {
             _state.update {
                 it.copy(
                     failure = CaptureFailure(FailureKind.MODEL_MISSING, "Model not ready", "Set up the recognition model before recording."),
@@ -110,23 +182,66 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             }
             return false
         }
-        val mine: Long
-        synchronized(lock) {
-            if (_state.value.phase != CapturePhase.IDLE) return false
-            token += 1
-            mine = token
-            frames.clear()
-            observed = 0
-            withFace = 0
-            _state.update {
-                it.copy(
-                    phase = CapturePhase.STARTING,
-                    cameraOn = true,
-                    elapsedMs = 0,
-                    limitMs = settings.maxClipSeconds.coerceIn(3, MAX_SESSION_SECONDS) * 1000L,
-                    failure = null,
-                )
+        var owned: QualityFrameAccumulator? = null
+        if (mode == RecognitionMode.QUALITY) {
+            val missing = CaptureFailure(
+                FailureKind.MODEL_MISSING,
+                "Quality model not ready",
+                "Prepare the Quality model in Models, or switch to Fast in Settings.",
+            )
+            if (deps.qualityModels.installedModels() == null) {
+                _state.update { it.copy(failure = missing) }
+                return false
             }
+            // Created outside the capture lock; the factory reads model files.
+            owned = try {
+                deps.recognizer.createQualityAccumulator()
+            } catch (_: OutOfMemoryError) {
+                _state.update { it.copy(failure = MEMORY_FAILURE) }
+                return false
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(failure = CaptureFailure(FailureKind.FAILED, "Quality could not start", e.message ?: e.javaClass.simpleName))
+                }
+                return false
+            }
+            if (owned == null) {
+                _state.update { it.copy(failure = missing) }
+                return false
+            }
+        }
+        val mine: Long
+        val adopted: Boolean
+        synchronized(lock) {
+            adopted = _state.value.phase == CapturePhase.IDLE
+            if (adopted) {
+                token += 1
+                mine = token
+                frames.clear()
+                observed = 0
+                withFace = 0
+                acceptedInputs = 0
+                sessionMode = mode
+                accumulator = owned
+                qualityCapture = owned != null
+                _state.update {
+                    it.copy(
+                        phase = CapturePhase.STARTING,
+                        mode = mode,
+                        progress = null,
+                        cameraOn = true,
+                        elapsedMs = 0,
+                        limitMs = settings.maxClipSeconds.coerceIn(3, MAX_SESSION_SECONDS) * 1000L,
+                        failure = null,
+                    )
+                }
+            } else {
+                mine = 0
+            }
+        }
+        if (!adopted) {
+            closeQuietly(owned)
+            return false
         }
         viewModelScope.launch {
             delay(CAMERA_START_TIMEOUT_MS)
@@ -150,24 +265,44 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun stop() {
-        val clip: List<MouthFrame>
-        val seen: Int
-        val faces: Int
-        val mine: Long
-        val limit: Long
+        val job: Job
         synchronized(lock) {
             if (_state.value.phase != CapturePhase.RECORDING) return
             ticker?.cancel()
-            clip = ArrayList(frames)
-            seen = observed
-            faces = withFace
-            mine = token
-            limit = _state.value.limitMs
+            val snapshot = ArrayList(frames)
+            val owner = accumulator
+            if (owner != null) {
+                // Flush every delayed tail so the end of the clip is not lost.
+                try {
+                    snapshot += owner.finish()
+                } catch (_: OutOfMemoryError) {
+                    snapshot.clear()
+                    failLocked(MEMORY_FAILURE.kind, MEMORY_FAILURE.title, MEMORY_FAILURE.detail)
+                    return
+                } catch (e: Exception) {
+                    failLocked(FailureKind.FAILED, "Quality capture failed", e.message ?: e.javaClass.simpleName)
+                    return
+                }
+            }
+            val clip: List<MouthFrame> = snapshot
+            val seen = observed
+            val faces = withFace
+            val mine = token
+            val limit = _state.value.limitMs
+            val mode = sessionMode
+            // The snapshot owns the frames now; drop the owner's copies so a 120 s clip is not held twice.
+            frames.clear()
+            dropAccumulatorLocked()
             // Frames arriving from here on are ignored; the camera is released by the UI.
-            _state.update { it.copy(phase = CapturePhase.PROCESSING, cameraOn = false, elapsedMs = minOf(it.elapsedMs, limit)) }
+            _state.update {
+                it.copy(phase = CapturePhase.PROCESSING, progress = null, cameraOn = false, elapsedMs = minOf(it.elapsedMs, limit))
+            }
             _live.value = LiveHint()
+            // Registered under the lock so a cancel can never miss it; a cancelled lazy job never runs.
+            job = viewModelScope.launch(start = CoroutineStart.LAZY) { finish(mine, clip, seen, faces, mode) }
+            worker = job
         }
-        worker = viewModelScope.launch { finish(mine, clip, seen, faces) }
+        job.start()
     }
 
     /** Cancel, Back, or the app leaving the foreground. Produces no transcript. */
@@ -186,7 +321,19 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     override fun onFrame(session: Long, bitmap: Bitmap, nowMs: Long) {
         if (session != token) return
         // Detector runs outside the lock; only the bookkeeping is synchronized.
-        val analysis = app.recognizer.analyze(bitmap, nowMs)
+        // Only an accepted Quality session asks for alignment data; previews use the plain path.
+        val analysis = if (qualityCapture) {
+            try {
+                deps.recognizer.analyzeForQuality(bitmap, nowMs)
+            } catch (_: OutOfMemoryError) {
+                synchronized(lock) {
+                    if (session == token) failLocked(MEMORY_FAILURE.kind, MEMORY_FAILURE.title, MEMORY_FAILURE.detail)
+                }
+                return
+            }
+        } else {
+            deps.recognizer.analyze(bitmap, nowMs)
+        }
         synchronized(lock) {
             if (session != token) return
             publishLive(analysis.faceDetected, analysis.brightness, analysis.motion, analysis.hint, nowMs)
@@ -194,11 +341,11 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 CapturePhase.STARTING -> {
                     recordStartMs = nowMs
                     _state.update { it.copy(phase = CapturePhase.RECORDING, elapsedMs = 0) }
-                    countLocked(analysis.faceDetected, analysis.mouth)
+                    countLocked(analysis)
                     ticker?.cancel()
                     ticker = viewModelScope.launch { tick(session) }
                 }
-                CapturePhase.RECORDING -> countLocked(analysis.faceDetected, analysis.mouth)
+                CapturePhase.RECORDING -> countLocked(analysis)
                 else -> Unit
             }
         }
@@ -246,10 +393,43 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     // --- internals -------------------------------------------------------
 
-    private fun countLocked(face: Boolean, mouth: MouthFrame?) {
+    private fun countLocked(analysis: FrameAnalysis) {
         observed += 1
-        if (face) withFace += 1
-        if (mouth != null && frames.size < MAX_SESSION_FRAMES) frames += mouth
+        if (analysis.faceDetected) withFace += 1
+        val owner = accumulator
+        if (owner == null) {
+            val mouth = analysis.mouth
+            if (mouth != null && frames.size < MAX_SESSION_FRAMES) frames += mouth
+            return
+        }
+        // A no-face observation carries no mouth, which ends the current aligned segment.
+        val feed = if (analysis.faceDetected) analysis else analysis.copy(mouth = null)
+        if (feed.mouth != null) {
+            if (acceptedInputs >= MAX_SESSION_FRAMES) return
+            acceptedInputs += 1
+        }
+        try {
+            frames += owner.offer(feed)
+        } catch (_: OutOfMemoryError) {
+            failLocked(MEMORY_FAILURE.kind, MEMORY_FAILURE.title, MEMORY_FAILURE.detail)
+        } catch (e: Exception) {
+            failLocked(FailureKind.FAILED, "Quality capture failed", e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    private fun dropAccumulatorLocked() {
+        closeQuietly(accumulator)
+        accumulator = null
+        acceptedInputs = 0
+        qualityCapture = false
+    }
+
+    private fun closeQuietly(owner: QualityFrameAccumulator?) {
+        try {
+            owner?.close()
+        } catch (_: Exception) {
+            // Nothing else holds it; a failed close must not break cancel.
+        }
     }
 
     private fun publishLive(face: Boolean, light: Float, motion: Float, hint: String, nowMs: Long) {
@@ -287,20 +467,34 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         ticker?.cancel()
         worker?.cancel()
         frames.clear()
+        dropAccumulatorLocked()
         observed = 0
         withFace = 0
         _live.value = LiveHint()
-        _state.update { it.copy(phase = CapturePhase.IDLE, cameraOn = false, elapsedMs = 0) }
+        _state.update { it.copy(phase = CapturePhase.IDLE, progress = null, cameraOn = false, elapsedMs = 0) }
     }
 
-    private suspend fun finish(mine: Long, clip: List<MouthFrame>, seen: Int, faces: Int) {
+    private suspend fun finish(mine: Long, clip: List<MouthFrame>, seen: Int, faces: Int, mode: RecognitionMode) {
         // The analyzer can only report frames with a mouth, so the face ratio is tracked here.
         if (seen == 0 || faces * 2 < seen) {
             return fail(mine, FailureKind.NO_FACE, "No face found", "Keep your face in frame and well lit for the whole clip.")
         }
-        val settings = app.repository.state.value.settings
+        val settings = deps.repository.state.value.settings
+        // Recognition never starts for a stale session; the check and the call are not under the lock.
+        if (!synchronized(lock) { token == mine && _state.value.phase == CapturePhase.PROCESSING }) return
         val outcome = try {
-            app.recognizer.recognize(clip, settings.computeMode)
+            if (mode == RecognitionMode.QUALITY) {
+                deps.recognizer.recognizeQuality(clip, settings.computeMode) { progress ->
+                    // Called outside the recognizer lock. Stale sessions must not repaint.
+                    synchronized(lock) {
+                        if (token == mine && _state.value.phase == CapturePhase.PROCESSING) {
+                            _state.update { it.copy(progress = progress) }
+                        }
+                    }
+                }
+            } else {
+                deps.recognizer.recognize(clip, settings.computeMode)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -313,16 +507,24 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 code == "no-speech" -> fail(mine, FailureKind.STILL, "No mouth movement", "Mouth the words clearly while you record. A still face gives no text.")
                 code == "invalid-clip" -> fail(mine, FailureKind.INTERRUPTED, "Capture was interrupted", "Frames were not continuous. Try again.")
                 code == "models-missing" -> fail(mine, FailureKind.MODEL_MISSING, "Model not ready", "Set up the recognition model before recording.")
+                code == "quality-models-missing" -> fail(mine, FailureKind.MODEL_MISSING, "Quality model not ready", "Prepare the Quality model in Models, or switch to Fast in Settings.")
+                code == "quality-memory-low" -> {
+                    // A fixed hardware limit never clears; otherwise the device only ran short this time.
+                    val fixed = deps.qualityModels.status.value.unavailableReason
+                    if (fixed != null) fail(mine, FailureKind.FAILED, "Quality unavailable", "$fixed Switch to Fast in Settings.")
+                    else fail(mine, FailureKind.FAILED, "Not enough free memory", "Quality ran short of memory this time. Close other apps and try again, or use Fast.")
+                }
+                code == "quality-crops-missing" -> fail(mine, FailureKind.INTERRUPTED, "Quality input incomplete", "Aligned face crops were not available for the whole clip. Try again with your face steady in frame.")
+                code.startsWith("quality-gate-failed") -> fail(mine, FailureKind.FAILED, "Quality check failed", code.removePrefix("quality-gate-failed:").trim())
+                code.startsWith("quality-recognition-failed") -> fail(mine, FailureKind.FAILED, "Quality recognition failed", code.removePrefix("quality-recognition-failed:").trim())
                 else -> fail(mine, FailureKind.FAILED, "Recognition failed", code.removePrefix("recognition-failed: "))
             }
         }
-        val vocabulary = app.repository.state.value.vocabulary
+        val vocabulary = deps.repository.state.value.vocabulary
         val text = TextRules.applyVocabulary(outcome.text, vocabulary).trim()
         if (text.isEmpty()) {
             return fail(mine, FailureKind.EMPTY, "No words recognised", "The model returned empty text. Try again, closer and slower.")
         }
-        // Last gate before any side effect.
-        if (!synchronized(lock) { token == mine && _state.value.phase == CapturePhase.PROCESSING }) return
         val entry = HistoryEntry(
             id = UUID.randomUUID().toString(),
             text = text,
@@ -331,51 +533,72 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             durationMs = outcome.durationMs.coerceIn(0, 120_000),
             inferenceMs = outcome.inferenceMs.coerceAtLeast(0),
         )
-        var saved = false
-        if (settings.keepHistory) {
-            saved = try {
-                app.repository.saveEntry(entry)
+        // Completion point: validate, copy and publish the finished dictation in one critical section.
+        // A cancel that wins the lock first yields nothing; one that comes later cannot revoke this result.
+        synchronized(lock) {
+            if (token != mine || _state.value.phase != CapturePhase.PROCESSING) return
+            val copied = settings.autoCopy && copyToClipboard(text)
+            _state.update {
+                it.copy(
+                    phase = CapturePhase.IDLE,
+                    progress = null,
+                    result = CaptureResult(
+                        entry.id, text, entry.raw, entry.createdAt, entry.durationMs, entry.inferenceMs,
+                        outcome.frames, outcome.backend, false, copied, mode,
+                    ),
+                    failure = null,
+                )
+            }
+        }
+        if (settings.keepHistory) persistCompleted(mine, entry)
+    }
+
+    /**
+     * Saves an already-published entry off the capture lock. The saved flag follows the matching result id even
+     * after a preview or new capture; the failure message only shows while the completing session is current.
+     */
+    private fun persistCompleted(mine: Long, entry: HistoryEntry) {
+        viewModelScope.launch {
+            val saved = try {
+                deps.repository.saveEntry(entry)
                 true
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
                 false
             }
-        }
-        val copied = settings.autoCopy && synchronized(lock) {
-            token == mine && copyToClipboard(text)
-        }
-        synchronized(lock) {
-            if (token != mine) return
-            _state.update {
-                it.copy(
-                    phase = CapturePhase.IDLE,
-                    result = CaptureResult(
-                        entry.id, text, entry.raw, entry.createdAt, entry.durationMs, entry.inferenceMs,
-                        outcome.frames, outcome.backend, saved, copied,
-                    ),
-                    failure = if (settings.keepHistory && !saved) {
-                        CaptureFailure(FailureKind.FAILED, "Not saved to history", "The transcript is shown but could not be stored.")
-                    } else null,
-                )
+            var editedMeanwhile = false
+            synchronized(lock) {
+                val current = _state.value.result ?: return@launch
+                if (current.id != entry.id) return@launch
+                editedMeanwhile = saved && current.text != entry.text
+                _state.update {
+                    it.copy(
+                        result = it.result?.copy(saved = saved),
+                        failure = if (!saved && token == mine && it.phase == CapturePhase.IDLE && it.failure == null) {
+                            CaptureFailure(FailureKind.FAILED, "Not saved to history", "The transcript is shown but could not be stored.")
+                        } else it.failure,
+                    )
+                }
             }
+            if (editedMeanwhile) persistEdit()
         }
     }
 
     private fun fail(mine: Long, kind: FailureKind, title: String, detail: String) {
         synchronized(lock) {
             if (token != mine) return
-            _state.update { it.copy(phase = CapturePhase.IDLE, failure = CaptureFailure(kind, title, detail)) }
+            _state.update { it.copy(phase = CapturePhase.IDLE, progress = null, failure = CaptureFailure(kind, title, detail)) }
         }
     }
 
     private suspend fun persistEdit() {
         val result = _state.value.result ?: return
         if (!result.saved) return
-        val stored = app.repository.state.value.history.firstOrNull { it.id == result.id } ?: return
+        val stored = deps.repository.state.value.history.firstOrNull { it.id == result.id } ?: return
         if (stored.text == result.text) return
         try {
-            app.repository.saveEntry(stored.copy(text = result.text))
+            deps.repository.saveEntry(stored.copy(text = result.text))
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -384,7 +607,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun copyToClipboard(text: String): Boolean = try {
-        val manager = app.getSystemService(ClipboardManager::class.java)
+        val manager = getApplication<Application>().getSystemService(ClipboardManager::class.java)
         val clip = ClipData.newPlainText("Stilltype", text)
         if (Build.VERSION.SDK_INT >= 33) {
             clip.description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }
@@ -396,11 +619,20 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     }
 
     override fun onCleared() {
-        synchronized(lock) { token += 1 }
+        synchronized(lock) {
+            token += 1
+            frames.clear()
+            dropAccumulatorLocked()
+        }
         super.onCleared()
     }
 
     private companion object {
+        val MEMORY_FAILURE = CaptureFailure(
+            FailureKind.FAILED,
+            "Not enough free memory",
+            "Quality ran short of memory this time. Close other apps and try again, or use Fast.",
+        )
         const val CAMERA_START_TIMEOUT_MS = 15_000L
         const val LIVE_INTERVAL_MS = 250L
         const val EDIT_SAVE_DELAY_MS = 700L

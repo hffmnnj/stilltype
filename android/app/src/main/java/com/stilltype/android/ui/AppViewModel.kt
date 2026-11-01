@@ -25,11 +25,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as StilltypeApplication
     private val repository = app.repository
     private val models = app.models
+    private val qualityModels = app.qualityModels
 
     val data: StateFlow<AppData> = repository.state
     val loading: StateFlow<Boolean> = repository.loading
     val storeError: StateFlow<String?> = repository.error
     val modelStatus: StateFlow<ModelStatus> = models.status
+    val qualityModelStatus: StateFlow<ModelStatus> = qualityModels.status
 
     private fun run(onFailure: (String) -> Unit = {}, block: suspend () -> Unit) {
         viewModelScope.launch {
@@ -87,6 +89,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 throw e
             } catch (_: Exception) {
                 // The repository publishes the failure on ModelStatus.error.
+            }
+        }
+    }
+
+    /** Independent of [prepareModel]; the Quality pack has its own status and consent. */
+    fun prepareQualityModel() {
+        viewModelScope.launch {
+            try {
+                qualityModels.prepareBundled()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // The repository publishes the failure on its ModelStatus.error.
             }
         }
     }

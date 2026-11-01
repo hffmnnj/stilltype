@@ -44,6 +44,7 @@ import com.stilltype.android.core.ComputeMode
 import com.stilltype.android.core.MAX_SESSION_SECONDS
 import com.stilltype.android.core.ExportFormat
 import com.stilltype.android.core.ModelStatus
+import com.stilltype.android.core.RecognitionMode
 import com.stilltype.android.platform.QuickAccess
 import com.stilltype.android.platform.TileAddResult
 import com.stilltype.android.ui.components.QuietButton
@@ -65,6 +66,7 @@ fun SettingsScreen(
     settings: AppSettings,
     historyCount: Int,
     model: ModelStatus,
+    quality: ModelStatus,
     onChange: ((AppSettings) -> AppSettings) -> Unit,
     onExport: (ExportFormat) -> Unit,
     onClearHistory: () -> Unit,
@@ -91,6 +93,53 @@ fun SettingsScreen(
         }
 
         SectionLabel("Recording")
+        // Quality also needs Fast: Fast runs the unchanged quiet/activity veto.
+        val qualityAvailable = model.installed && quality.installed
+        Choice(
+            "Recognition",
+            RecognitionMode.entries,
+            settings.recognitionMode,
+            { it.label() },
+            optionEnabled = { it == RecognitionMode.FAST || qualityAvailable },
+        ) { value -> onChange { it.copy(recognitionMode = value) } }
+        Text(
+            if (settings.recognitionMode == RecognitionMode.QUALITY) {
+                "Quality is experimental: full beam50 search with non-commercial weights. It takes longer and uses more memory than Fast."
+            } else {
+                "Fast uses the optimized CTC model. It is the quickest and lightest option."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.muted,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        if (quality.unavailableReason != null) {
+            Text(
+                quality.unavailableReason ?: "",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+            if (settings.recognitionMode == RecognitionMode.QUALITY) {
+                SecondaryButton(
+                    "Use Fast",
+                    { onChange { it.copy(recognitionMode = RecognitionMode.FAST) } },
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+        } else if (!qualityAvailable) {
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    if (model.installed) qualityHeadline(quality).first else modelHeadline(model).first,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                SecondaryButton("Set up", onOpenModels)
+            }
+        }
+        Rule()
         Choice(
             "Compute",
             ComputeMode.entries,
@@ -190,19 +239,10 @@ fun SettingsScreen(
             modifier = Modifier.padding(top = 4.dp),
         )
 
-        SectionLabel("Model")
-        Row(
-            Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(onClickLabel = "Open models", onClick = onOpenModels),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Recognition model", style = MaterialTheme.typography.bodyLarge)
-                Text(modelHeadline(model).first, style = MaterialTheme.typography.bodySmall, color = colors.muted)
-            }
-            if (model.installed) StatusChip("Ready", tone = colors.success)
-            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.muted)
-        }
+        SectionLabel("Models")
+        ModelRow("Fast model", modelHeadline(model).first, model.installed, onOpenModels)
+        Rule()
+        ModelRow("Quality model", qualityHeadline(quality).first, quality.installed, onOpenModels)
 
         SectionLabel("Privacy")
         Text(
@@ -222,6 +262,23 @@ fun SettingsScreen(
             confirmButton = { QuietButton("Clear history", { confirmClear = false; onClearHistory() }, destructive = true) },
             dismissButton = { QuietButton("Cancel", { confirmClear = false }) },
         )
+    }
+}
+
+@Composable
+private fun ModelRow(title: String, status: String, ready: Boolean, onOpen: () -> Unit) {
+    val colors = StilltypeTheme.colors
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(onClickLabel = "Open models", onClick = onOpen),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(status, style = MaterialTheme.typography.bodySmall, color = colors.muted)
+        }
+        if (ready) StatusChip("Ready", tone = colors.success)
+        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.muted)
     }
 }
 
@@ -248,6 +305,7 @@ private fun <T> Choice(
     selected: T,
     name: (T) -> String,
     enabled: Boolean = true,
+    optionEnabled: (T) -> Boolean = { true },
     onSelect: (T) -> Unit,
 ) {
     Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -257,7 +315,7 @@ private fun <T> Choice(
                 SegmentedButton(
                     selected = option == selected,
                     onClick = { onSelect(option) },
-                    enabled = enabled,
+                    enabled = enabled && optionEnabled(option),
                     shape = SegmentedButtonDefaults.itemShape(index, options.size),
                     modifier = Modifier.heightIn(min = 48.dp),
                     label = { Text(name(option), style = MaterialTheme.typography.labelLarge, maxLines = 1) },

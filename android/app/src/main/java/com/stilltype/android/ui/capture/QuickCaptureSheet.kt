@@ -48,7 +48,9 @@ import com.stilltype.android.ui.components.SecondaryButton
 import com.stilltype.android.ui.screens.StageButton
 import com.stilltype.android.ui.screens.StageMessage
 import com.stilltype.android.ui.screens.isChecking
-import com.stilltype.android.ui.screens.modelHeadline
+import com.stilltype.android.ui.screens.captureReadiness
+import com.stilltype.android.ui.screens.label
+import com.stilltype.android.core.RecognitionMode
 import com.stilltype.android.ui.theme.StilltypeTheme
 import com.stilltype.android.ui.theme.WordmarkStyle
 
@@ -69,6 +71,7 @@ fun QuickCaptureSheet(
     val live by capture.live.collectAsStateWithLifecycle()
     val data by app.data.collectAsStateWithLifecycle()
     val model by app.modelStatus.collectAsStateWithLifecycle()
+    val quality by app.qualityModelStatus.collectAsStateWithLifecycle()
     val loading by app.loading.collectAsStateWithLifecycle()
     var resumed by remember { mutableStateOf(false) }
     val access = rememberCameraAccess { capture.start() }
@@ -89,7 +92,9 @@ fun QuickCaptureSheet(
     BackHandler { close() }
 
     val busy = state.phase != CapturePhase.IDLE
-    val ready = model.installed && !loading
+    val mode = if (busy) state.mode else data.settings.recognitionMode
+    val readiness = captureReadiness(mode, model, quality, loading)
+    val ready = readiness.ready
     val result = state.result
     val maxSecs = data.settings.maxClipSeconds.coerceIn(3, MAX_SESSION_SECONDS)
     val limitLabel = if (maxSecs >= MAX_SESSION_SECONDS) "Up to 2:00" else "Up to $maxSecs seconds"
@@ -118,12 +123,17 @@ fun QuickCaptureSheet(
                 }
 
                 when {
-                    loading || isChecking(model) -> BusyRow("Checking the model")
+                    loading || isChecking(model) || (mode == RecognitionMode.QUALITY && isChecking(quality)) -> BusyRow("Checking the model")
                     !ready -> {
-                        val (title, detail) = modelHeadline(model)
-                        Text(title, style = MaterialTheme.typography.titleMedium)
-                        Text(detail, style = MaterialTheme.typography.bodyMedium, color = colors.muted)
-                        if (model.bundled) PrimaryButton("Open model setup", onOpenModels, modifier = Modifier.fillMaxWidth())
+                        Text(readiness.headline, style = MaterialTheme.typography.titleMedium)
+                        Text(readiness.detail, style = MaterialTheme.typography.bodyMedium, color = colors.muted)
+                        if (readiness.offerFast) {
+                            PrimaryButton(
+                                "Use Fast",
+                                { app.updateSettings({ Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }) { it.copy(recognitionMode = RecognitionMode.FAST) } },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        } else if (model.bundled || model.installed) PrimaryButton("Open model setup", onOpenModels, modifier = Modifier.fillMaxWidth())
                     }
                     result != null && !busy -> {
                         TranscriptPanel(
@@ -157,7 +167,7 @@ fun QuickCaptureSheet(
                             }
                         }
                         state.failure?.let { FailureNotice(it, onDismiss = capture::clearFailure) }
-                        if (state.phase == CapturePhase.PROCESSING) BusyRow("Processing on this device")
+                        if (state.phase == CapturePhase.PROCESSING) ProcessingStatus(state, onCancel = capture::cancel)
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                             RecordButton(
                                 state.phase,
@@ -176,7 +186,7 @@ fun QuickCaptureSheet(
                                 )
                                 Text(
                                     if (state.phase == CapturePhase.RECORDING) "${formatClock(state.elapsedMs)} of ${formatClock(state.limitMs)}"
-                                    else limitLabel,
+                                    else "${mode.label()} · $limitLabel",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = colors.muted,
                                 )

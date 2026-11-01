@@ -84,6 +84,7 @@ fun StilltypeApp(app: AppViewModel, capture: CaptureViewModel, start: Destinatio
 
     val data by app.data.collectAsStateWithLifecycle()
     val model by app.modelStatus.collectAsStateWithLifecycle()
+    val quality by app.qualityModelStatus.collectAsStateWithLifecycle()
     val loading by app.loading.collectAsStateWithLifecycle()
     val storeError by app.storeError.collectAsStateWithLifecycle()
 
@@ -189,6 +190,7 @@ fun StilltypeApp(app: AppViewModel, capture: CaptureViewModel, start: Destinatio
                     settings = data.settings,
                     historyCount = data.history.size,
                     model = model,
+                    quality = quality,
                     onChange = { transform -> app.updateSettings(notify, transform) },
                     onExport = { format: ExportFormat ->
                         app.export(
@@ -204,9 +206,13 @@ fun StilltypeApp(app: AppViewModel, capture: CaptureViewModel, start: Destinatio
                 Destination.MODELS -> ModelsScreen(
                     padding,
                     status = model,
+                    quality = quality,
+                    mode = data.settings.recognitionMode,
                     compute = data.settings.computeMode,
                     onPrepare = app::prepareModel,
+                    onPrepareQuality = app::prepareQualityModel,
                     onOpenSettings = { go(Destination.SETTINGS) },
+                    notify = notify,
                 )
             }
         }

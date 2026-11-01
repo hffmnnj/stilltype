@@ -22,6 +22,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import com.stilltype.android.core.ModelStatus
+import com.stilltype.android.core.RecognitionMode
 import com.stilltype.android.ui.theme.StilltypeTheme
 
 /** Width above which Dictate lays out side by side and navigation becomes a rail. */
@@ -75,7 +76,43 @@ fun KeyValueRow(label: String, value: String, modifier: Modifier = Modifier) {
 
 /** The repository's initial status, before it has resolved the bundled assets. */
 fun isChecking(status: ModelStatus): Boolean =
-    !status.bundled && !status.installed && !status.preparing && status.error == null && status.message == "Checking model"
+    !status.bundled && !status.installed && !status.preparing && status.error == null && status.message.startsWith("Checking")
+
+fun RecognitionMode.label(): String = if (this == RecognitionMode.QUALITY) "Quality" else "Fast"
+
+/** Headline and detail for the optional Quality pack, which has its own status. */
+fun qualityHeadline(status: ModelStatus): Pair<String, String> = when {
+    // A fixed hardware limit outranks every setup or download state.
+    status.unavailableReason != null -> "Quality unavailable" to (status.unavailableReason ?: status.message)
+    status.installed -> "Quality model ready" to "Verified and prepared on this device."
+    status.preparing -> "Preparing Quality model" to status.message
+    status.error != null -> "Quality setup failed" to (status.error ?: status.message)
+    isChecking(status) -> "Checking Quality model" to "Verifying the bundled files."
+    !status.bundled -> "Quality model not bundled" to "This build has no Quality model."
+    else -> "Quality model not set up" to "Prepare the optional pack once to use Quality."
+}
+
+/**
+ * Whether a recording in [mode] can start. Fast is always required because it
+ * runs the unchanged quiet/activity gate; Quality additionally needs its pack.
+ */
+data class CaptureReadiness(
+    val ready: Boolean,
+    val headline: String,
+    val detail: String,
+    /** True when the selected Quality mode is blocked by hardware, so an explicit "Use Fast" resolves it. */
+    val offerFast: Boolean = false,
+)
+
+fun captureReadiness(mode: RecognitionMode, fast: ModelStatus, quality: ModelStatus, loading: Boolean): CaptureReadiness = when {
+    loading -> CaptureReadiness(false, "Loading", "")
+    mode == RecognitionMode.QUALITY && quality.unavailableReason != null ->
+        qualityHeadline(quality).let { CaptureReadiness(false, it.first, it.second, offerFast = true) }
+    !fast.installed -> modelHeadline(fast).let { CaptureReadiness(false, it.first, it.second) }
+    mode == RecognitionMode.QUALITY && !quality.installed ->
+        qualityHeadline(quality).let { CaptureReadiness(false, it.first, it.second) }
+    else -> CaptureReadiness(true, "${mode.label()} ready", "")
+}
 
 /** Headline and detail for the model state shared by Dictate and Models. */
 fun modelHeadline(status: ModelStatus): Pair<String, String> = when {
