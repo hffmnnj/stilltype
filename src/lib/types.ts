@@ -1,5 +1,7 @@
 export type Theme = 'system' | 'light' | 'dark';
 export type DictationMode = 'hold' | 'toggle';
+export type CleanupMode = 'format' | 'intent';
+export type CleanupModel = 'auto' | 'qwen3.5-0.8b-2026-q4' | 'qwen3.5-2b-2026-q4' | 'qwen3.5-4b-2026-q4';
 export interface Settings {
   theme: Theme;
   cameraId: string;
@@ -11,7 +13,8 @@ export interface Settings {
   keepHistory: boolean;
   retentionDays: number;
   cleanupEnabled: boolean;
-  cleanupModel: string;
+  cleanupModel: CleanupModel;
+  cleanupMode: CleanupMode;
   pauseSeconds: number;
   beamSize: number;
   inferenceDevice: 'auto' | 'gpu' | 'cpu';
@@ -61,6 +64,8 @@ export interface CleanupStatus {
   device: string;
   error: string | null;
   totalBytes: number;
+  recommendedModelId: string;
+  models: { id: Exclude<CleanupModel, 'auto'>; label: string; totalBytes: number; installed: boolean }[];
 }
 export interface CapturedFrame {
   jpeg: string;
@@ -107,7 +112,7 @@ export const defaultSettings: Settings = {
   theme: 'system', cameraId: '', mirrored: true, showPreview: true,
   shortcut: 'CommandOrControl+Shift+Space', dictationMode: 'toggle',
   autoPaste: false, keepHistory: true, retentionDays: 30,
-  cleanupEnabled: false, cleanupModel: 'qwen3.5-0.8b-2026-q4',
+  cleanupEnabled: false, cleanupModel: 'auto', cleanupMode: 'format',
   pauseSeconds: 0.7, beamSize: 5, inferenceDevice: 'auto', maxClipSeconds: 120, context: '',
 };
 /** Native command arguments and worker requests use camelCase payload fields. */

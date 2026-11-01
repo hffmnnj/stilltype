@@ -19,6 +19,7 @@ base64 = "0.22"
 enigo = { version = "0.2", default-features = false, features = ["x11rb", "wayland"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 sha2 = "0.10"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["vulkan"] }
@@ -28,3 +29,7 @@ llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["met
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+
+# Large model checksums must fit the same startup deadline in debug builds.
+[profile.dev.package.sha2]
+opt-level = 3

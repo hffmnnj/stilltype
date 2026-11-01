@@ -127,7 +127,7 @@ Controls have 6 px radius, panels 12 px and the overlay 18 px. Record stays circ
 - Camera stage: real preview when available; deliberate face guide and actionable denied/no-device state otherwise.
 - Overlay: a compact 360 px native window with the generated brand mark, short status text, tabular elapsed time and compact row actions plus quiet dismiss. It never shows a waveform or invented activity.
 - History: date-grouped editable rows, raw/cleaned text, favorite, copy and delete. Never seed invented dictations.
-- Model setup: real 2026 recognition engine information, explicit download consent, meaningful progress, GPU-first and CPU selection, and real readiness. Transcript cleanup is a bundled local text model with its own consent, status and toggle; no network service is involved.
+- Model setup: real 2026 recognition engine information, explicit download consent, meaningful progress, GPU-first and CPU selection, and real readiness. Transcript cleanup is a bundled local Qwen3.5 text model with its own consent, status and toggle; no network service is involved. Model choice is Auto, 0.8B, 2B or 4B with native size and installed state; Auto is a memory heuristic, not an accuracy ranking, and uses an installed tier before downloading. Format mode fixes casing and punctuation only. Intent mode is experimental, may change wording, falls back to the recognized text with a warning when edits exceed the native guard, and says to review the result. Mode alone never enables cleanup; the toggle needs an installed selected model. The Context field is an optional hint for Intent mode only. Original recognition stays reachable from Dictate and History.
 - Preview overlay: the same overlay presentation rendered inline in Settings with live readiness, for inspection without hardware.
 
 ## Do's and Don'ts
@@ -153,6 +153,7 @@ Controls have 6 px radius, panels 12 px and the overlay 18 px. Record stays circ
 - A main-window preview action publishes honest current readiness through overlay_action preview without starting capture or opening the camera. Normal in-window capture does not show the overlay.
 - Capture runs on a bounded timer cadence, not animation frames, so capture timing is paint-independent; background throttling is still platform-dependent, so hidden-window capture is not guaranteed on every OS.
 - Recording shows stop, elapsed time and the configured limit (default 2 minutes, adjustable within 3–120 s on desktop and Android). Frame writes finish before transcription.
+- Cleanup status describes the saved model choice: on change, wait for the save, show Checking instead of stale size or readiness, ignore obsolete results, and lock selection and conflicting actions during a download. Consent names the model and size being installed. Browser preview keeps downloads unavailable and readiness false.
 - Data stays local. Downloads are intentional. Transcript cleanup runs through the bundled engine only.
 - Respect reduced motion. Transitions are 120–180 ms opacity/transform, no ornamental loops. Focus stays visible.
 - Dictate stays mounted during navigation so an explicitly enabled camera and native shortcut continue working; the persistent shell exposes camera state. Recording does not pulse.

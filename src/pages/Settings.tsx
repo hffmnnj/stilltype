@@ -194,8 +194,11 @@ function ContextRow() {
   return (
     <div className="row row-stack">
       <div className="row-text">
-        <label htmlFor={id} className="row-label">Context</label>
-        <p className="row-hint">A line about what you usually write. It nudges the model toward your vocabulary.</p>
+        <label htmlFor={id} className="row-label">Context for intent correction</label>
+        <p className="row-hint">
+          Optional. A line about what you usually write, used only in Intent mode.
+          {settings.cleanupMode === 'intent' ? '' : ' Intent mode is off, so it is saved but not used.'}
+        </p>
       </div>
       <textarea
         id={id}

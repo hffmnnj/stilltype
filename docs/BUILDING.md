@@ -166,14 +166,21 @@ HTTP request — no external server is required.
 - **Acceleration:** Vulkan on Linux/Windows, Metal on macOS, with a runtime
   CPU alternative and GPU-preferred Auto, over pthreads with no OpenMP
   requirement. GPU execution is not universal —
-  where acceleration is unavailable the runtime falls back to CPU.
+  Auto can fall back to CPU; an explicit GPU choice reports an error instead.
 - **Extra build prerequisites:** a C/C++ compiler and CMake on all
   platforms, Clang/libclang for bindgen, plus Linux Vulkan headers/loader,
   SPIRV-Headers and `glslc` (or the Windows Vulkan SDK), and Xcode/Metal
   tooling on macOS. Bound both build-parallelism knobs to 4:
   `CMAKE_BUILD_PARALLEL_LEVEL=4` and `CARGO_BUILD_JOBS=4`.
-- **The text model** is Qwen3.5-0.8B (created 2026-02-28, Apache-2.0; see
-  <https://huggingface.co/Qwen/Qwen3.5-0.8B>). Stilltype uses the
+- **Text models:** the 2026 Qwen3.5 0.8B, 2B and 4B releases (Apache-2.0).
+  Auto recommends 0.8B below 12 GiB physical RAM, 2B from 12 GiB, and 4B
+  from 24 GiB. This is a capacity heuristic, not an accuracy ranking. It uses
+  an eligible installed model without silently downloading, and can fall
+  back to a smaller installed tier if loading fails. Explicit choices do not
+  change tier silently. Larger models also need available-memory headroom.
+  The legacy 0.8B installation remains compatible.
+  The 0.8B source (created 2026-02-28) is
+  <https://huggingface.co/Qwen/Qwen3.5-0.8B>. Stilltype uses the
   `bartowski/Qwen_Qwen3.5-0.8B-GGUF` GGUF at revision
   `f36b1ea49a332ede8fe5f389bbf5b3575ef71f48`, file
   `Qwen_Qwen3.5-0.8B-Q4_K_M.gguf` (579,615,840 bytes, ~580 MB; SHA256
@@ -183,11 +190,33 @@ HTTP request — no external server is required.
   pinned HTTPS download verified by SHA256 before use and never committed to
   git. They land at `models/cleanup/qwen3.5-0.8b-q4_k_m.gguf` under the
   app-data directory. Text cleanup only — no image projector is downloaded.
-- **Behavior:** cleanup stays off by default, preserves the raw recognition
-  output, and only tidies punctuation/capitalization. If the runtime is
-  unavailable, or if its output would change words, the raw recognition text
-  is retained with a warning. No semantic look-alike-word correction is
-  promised.
+  The additional pinned GGUFs are:
+
+  | Tier | Bytes | GGUF revision | SHA-256 |
+  | --- | ---: | --- | --- |
+  | [2B](https://huggingface.co/bartowski/Qwen_Qwen3.5-2B-GGUF) | 1,396,198,496 | `7d26695454df6de5fbcce2e58681e62dae06ce43` | `57a1085840f497d764a7fc5d346922dbde961efb54cc792ea81d694fd846a1d8` |
+  | [4B](https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF) | 3,013,027,808 | `4168f45a16a1290d65a4ec0fa312ae917a4c15d6` | `13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983` |
+
+  Filenames under `models/cleanup/` are `qwen3.5-2b-q4_k_m.gguf` and
+  `qwen3.5-4b-q4_k_m.gguf`, with distinct verified-install markers.
+- **Behavior:** cleanup stays off by default and always preserves raw
+  recognition. **Format**, the default mode, only changes punctuation and case.
+  **Intent** is an experimental, opt-in final-result pass that may repair words
+  using the optional Context hint. It cannot establish the speaker's intent.
+  Digit sequences, lexical negations and existing vocabulary terms are guarded;
+  word edits are bounded. Rejected output or runtime failure retains the
+  recognized text with a warning. Review assisted text before using it.
+- **Research measurements:** all three tiers completed real CPU runs through
+  the embedded runtime. On the initial 120-word development set, assisted WER
+  was 87.5%, 87.5% and 89.17% respectively, versus 87.5% raw. These results do
+  not justify an accuracy claim or automatically enabling Intent.
+
+For a reference-free local comparison, build `cargo build --example cleanup_bench`
+from `src-tauri/`. The executable takes `--model PATH --model-id ID --device
+cpu|auto|gpu --mode format|intent`, reads JSONL `{id,text,context?}` on stdin,
+and writes `{id,text,error,modelId,device,inferenceMs}` on stdout. Use only
+checksum-verified local files. This diagnostic uses the production runtime and
+validator; its per-record times exclude loading and installer checksum work.
 
 ## Signing and releases
 

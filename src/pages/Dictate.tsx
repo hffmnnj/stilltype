@@ -239,7 +239,7 @@ function Transcript() {
           />
           {rawDiffers ? (
             <details className="raw">
-              <summary>Raw model output</summary>
+              <summary>Original recognition</summary>
               <p>{draft.raw}</p>
             </details>
           ) : null}
