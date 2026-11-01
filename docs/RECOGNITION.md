@@ -641,3 +641,21 @@ but increased development errors from 20/170 to 22/170. Restoring FP32 cross
 projections and decoder while retaining the INT8 encoder still gave 22/170.
 Those candidates were not run on held-out data or adopted. Smaller files alone
 are not sufficient evidence of a better recognizer.
+
+### Further fixed development probes
+
+A horizontal-mirror probability ensemble used the unchanged released beam-50
+search, two independent encoder states, and the same weights for both views.
+An identical-view control reproduced the original output, but the mirrored
+candidate increased development errors from 20/170 to 21/170. Masking the full-
+face branch and retaining only the lip branch gave 19/170. Neither met the fixed
+eligibility threshold of at most 17 errors; neither received another held-out
+comparison or became a default.
+
+A separate routing calculation vetoed Quality output whenever the saved current
+per-frame CTC result had an error or empty text. All 40 speech clips were admitted,
+leaving FLARE's 20/170, 47/204 and 40/258 scores unchanged. This demonstrates no
+accuracy cost on those admitted samples, not validated integrated quiet behavior.
+The earlier CTC quiet controls used host desktop-aligned ROIs. Actual Android
+preprocessing and the combined pipeline still need direct checks; an ungated
+model switch remains inappropriate.
