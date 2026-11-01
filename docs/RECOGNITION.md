@@ -352,3 +352,32 @@ not the beam-50 model's 46/141. On a Ryzen 9 8945HS with four ORT threads,
 encoder time was 0.92–1.42 seconds per clip and full-prefix decoder time was
 0.25–0.99 seconds, excluding graph loading and preprocessing. The decoder
 recomputes its prefix on every step; these are not phone speed measurements.
+
+### Incremental decoder export
+
+Add `--decoder-mode cached` to the export command to produce `encoder.onnx`,
+`cross.onnx` and `decoder-cache.onnx` instead of the full-prefix decoder.
+`tools/benchmark_flare.py` detects the mode from metadata; its command is
+unchanged. The default remains `full`, and a full-mode regression still matched
+the independent Torch sequence after adding the cached path.
+
+The cross graph projects all six decoder layers' attention keys and values
+once. Each decoding step supplies the full prefix for positional indexing,
+but fairseq processes only the newest token and returns updated self-attention
+caches. Each key/value has shape `[1,4,length,192]`; the first self cache has
+length zero. Cache geometry and all three graph sizes/hashes are recorded in
+metadata. The same EOS/PAD rules and 128-step failure limit apply.
+
+The published cached exporter was run against the trusted pristine source,
+then the runtime matched complete independent Torch token sequences on all
+eight development clips. This preserves greedy output, not the better beam-50
+WER. The prototype also matched 24 next-token argmax checks at prefix lengths
+1, 5 and 10, with maximum log-probability difference 0.001740. A decoder-only
+masked-tail check passed; padded visual-encoder parity remains unverified.
+
+On the Ryzen host, one 128-frame input took about 0.95 seconds for the encoder,
+0.007 seconds for cross projections and 0.19 seconds for cached decoding,
+versus about 0.45 seconds for full-prefix decoding in separate prototype
+measurements. These are CPU internal-stage timings, excluding graph loads,
+camera and preprocessing. See [ANDROID.md](ANDROID.md#cached-decoder-benchmark)
+for actual native execution and its different performance envelope.
