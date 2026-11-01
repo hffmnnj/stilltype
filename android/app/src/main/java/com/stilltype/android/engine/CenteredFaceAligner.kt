@@ -5,6 +5,7 @@ import com.stilltype.android.core.FrameAnalysis
 import com.stilltype.android.core.ImagePoint
 import com.stilltype.android.core.MouthFrame
 import com.stilltype.android.core.QualityCrops
+import com.stilltype.android.core.QualityFrameAccumulator
 import java.util.ArrayDeque
 import kotlin.math.round
 import org.opencv.android.OpenCVLoader
@@ -22,7 +23,7 @@ import org.opencv.imgproc.Imgproc
  * A missing or invalid pair ends a segment; unlike desktop, gaps are not interpolated.
  * All calls are serialized by the owning capture session, which must not mutate buffers.
  */
-internal class CenteredFaceAligner(reference: List<ImagePoint>) : AutoCloseable {
+internal class CenteredFaceAligner(reference: List<ImagePoint>) : QualityFrameAccumulator {
     init {
         require(reference.size == 4 && reference.all { it.x.isFinite() && it.y.isFinite() })
         check(OpenCVLoader.initLocal()) { "OpenCV initialization failed" }
@@ -42,7 +43,7 @@ internal class CenteredFaceAligner(reference: List<ImagePoint>) : AutoCloseable 
 
     val retainedFrameCount: Int get() = frames.size
 
-    fun offer(analysis: FrameAnalysis): List<MouthFrame> {
+    override fun offer(analysis: FrameAnalysis): List<MouthFrame> {
         check(!closed)
         val mouth = analysis.mouth
         val alignment = analysis.alignment
@@ -58,7 +59,7 @@ internal class CenteredFaceAligner(reference: List<ImagePoint>) : AutoCloseable 
         return output
     }
 
-    fun finish(): List<MouthFrame> {
+    override fun finish(): List<MouthFrame> {
         check(!closed)
         val output = mutableListOf<MouthFrame>()
         while (next < received) {
@@ -70,7 +71,7 @@ internal class CenteredFaceAligner(reference: List<ImagePoint>) : AutoCloseable 
         return output
     }
 
-    fun reset() {
+    override fun reset() {
         check(!closed)
         frames.clear()
         previousTransform?.release()
@@ -135,14 +136,18 @@ internal class CenteredFaceAligner(reference: List<ImagePoint>) : AutoCloseable 
             val x = round((row0[0] * xs[3] + row0[1] * ys[3] + row0[2] - 48).coerceIn(0.0, 160.0)).toInt()
             val y = round((row1[0] * xs[3] + row1[1] * ys[3] + row1[2] - 48).coerceIn(0.0, 160.0)).toInt()
             val lipRoi = aligned.submat(Rect(x, y, 96, 96))
-            val faceRoi = aligned.submat(Rect(32, 32, 192, 192))
             try {
-                val lipPixels = ByteArray(96 * 96).also { lipRoi.get(0, 0, it) }
-                Imgproc.resize(faceRoi, face, Size(96.0, 96.0), 0.0, 0.0, Imgproc.INTER_LINEAR)
-                val facePixels = ByteArray(96 * 96).also { face.get(0, 0, it) }
-                return current.mouth.copy(quality = QualityCrops(facePixels, lipPixels))
+                val faceRoi = aligned.submat(Rect(32, 32, 192, 192))
+                try {
+                    val lipPixels = ByteArray(96 * 96).also { lipRoi.get(0, 0, it) }
+                    Imgproc.resize(faceRoi, face, Size(96.0, 96.0), 0.0, 0.0, Imgproc.INTER_LINEAR)
+                    val facePixels = ByteArray(96 * 96).also { face.get(0, 0, it) }
+                    return current.mouth.copy(quality = QualityCrops(facePixels, lipPixels))
+                } finally {
+                    faceRoi.release()
+                }
             } finally {
-                lipRoi.release(); faceRoi.release()
+                lipRoi.release()
             }
         } finally {
             source.release(); inliers.release(); estimated?.release(); gray.release()

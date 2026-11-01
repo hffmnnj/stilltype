@@ -41,4 +41,5 @@ internal data class FlareBeamOutput(
     /** Includes the initial EOS prefix and naturally finalized EOS. */
     val tokenIds: List<Long>,
     val timings: FlareBeamTimings,
+    val backend: String = "CPU encoder; CPU decoder",
 )

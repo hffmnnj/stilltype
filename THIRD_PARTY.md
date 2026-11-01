@@ -20,6 +20,7 @@ Local changes to third-party files are kept minimal and noted where they occur.
 | What | How it arrives | Terms |
 | --- | --- | --- |
 | USR 2.0 Base+ high-resource full-model checkpoint (`models/usr2/baseplus.pth`, ~1.39 GB / ~1.3 GiB) | Downloaded only after explicit `--accept-license` consent in `engine/install.py` (fetched with `gdown`), or via the app's Models page | Pretrained research/data rights are **separate from the code licence** — check upstream before your intended use |
+| FLARE Base 2026 Quality export (optional Android pack; 338,114,514 graph bytes) | Exported from the pinned released checkpoint, compacted and supplied outside Git with `qualityModelDir`; prepared separately after in-app consent | **CC-BY-NC-4.0**, not unrestricted commercial use. [Release](https://huggingface.co/Anony94/FLARE-checkpoints), revision `6187ad650dc1786a8efc8b6bfbee37bbf62c4b2e`; [complete attribution](android/app/src/main/assets/licenses/FLARE-NOTICE.txt) and [license](android/app/src/main/assets/licenses/FLARE-CC-BY-NC-4.0.txt) ship in the APK |
 | Qwen3.5-0.8B text-cleanup GGUF (`models/cleanup/qwen3.5-0.8b-q4_k_m.gguf`, 579,615,840 bytes / ~580 MB) | Separate consent-gated pinned HTTPS download, SHA256-verified before use (`fb044e93939a70469c905781334f5de1e6c8b608ced6cbc8c9249bd4127d9526`); never in git | Apache-2.0 ([Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B), created 2026-02-28; GGUF from [bartowski/Qwen_Qwen3.5-0.8B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen3.5-0.8B-GGUF) at revision `f36b1ea49a332ede8fe5f389bbf5b3575ef71f48`, text cleanup only, no image projector) |
 | Qwen3.5-2B text-cleanup GGUF (1,396,198,496 bytes) | Separate consent-gated pinned HTTPS download; exact revision and SHA-256 in [BUILDING.md](docs/BUILDING.md); never in git | Apache-2.0 ([Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B); [GGUF packaging](https://huggingface.co/bartowski/Qwen_Qwen3.5-2B-GGUF), created 2026-03-01) |
 | Qwen3.5-4B text-cleanup GGUF (3,013,027,808 bytes) | Separate consent-gated pinned HTTPS download; exact revision and SHA-256 in [BUILDING.md](docs/BUILDING.md); never in git | Apache-2.0 ([Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B); [GGUF packaging](https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF), created 2026-02-27) |
@@ -37,6 +38,12 @@ to the Android build. Exporting or quantizing does not remove upstream model
 or training-data obligations; review those terms before distributing an APK
 with weights. The copied token and mean-face data retain upstream provenance.
 
+The Quality pack derives from `exp_22_base/finetuned/checkpoints/checkpoint_last.pt`,
+SHA-256 `fe8c8ecab633bd4e3e490924e2bc917420b4d18d7309a5cd612902ccc842853b`.
+ONNX export, compact weight storage and weightless cache helpers do not create
+newly trained weights or remove the source's non-commercial restriction. The
+checkpoint release identifies its contributors collectively rather than by name.
+
 ## Android runtime
 
 - **ONNX Runtime Android 1.24.3** —
@@ -45,7 +52,7 @@ with weights. The copied token and mean-face data retain upstream provenance.
   [opencv/opencv](https://github.com/opencv/opencv/tree/4.11.0), Apache-2.0.
 - **AndroidX, CameraX, Jetpack Compose and Material 3** — Apache-2.0;
   resolved versions are declared in `android/app/build.gradle.kts`.
-- The APK includes ONNX Runtime, OpenCV, YuNet, USR2 and Geist notices in
+- The APK includes ONNX Runtime, OpenCV, YuNet, USR2, FLARE and Geist notices in
   `android/app/src/main/assets/licenses/`. Android uses the same pinned
   YuNet helper described below; no model or font is fetched at runtime.
 

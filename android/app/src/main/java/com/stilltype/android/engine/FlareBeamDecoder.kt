@@ -5,17 +5,24 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
+import ai.onnxruntime.providers.NNAPIFlags
+import android.util.Log
+import com.stilltype.android.core.ComputeMode
+import java.io.File
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
+import java.util.EnumSet
 import java.util.PriorityQueue
 import kotlin.math.exp
 import kotlin.math.ln
 
-/** CPU-only experimental decoder. Result owners outlive all tensors borrowed from them. */
+/** Result owners outlive all tensors borrowed from them. Only the encoder may use NNAPI. */
 internal class FlareBeamDecoder(
     private val environment: OrtEnvironment,
     files: FlareGraphFiles,
     private val beamSize: Int,
+    computeMode: ComputeMode = ComputeMode.CPU,
+    profileDirectory: File? = null,
 ) : AutoCloseable {
     private val sessions = Resources()
     private val encoder: OrtSession
@@ -23,14 +30,35 @@ internal class FlareBeamDecoder(
     private val decoder: OrtSession
     private val gather: OrtSession
     private val merge: OrtSession
+    private var profilePrefix: File? = null
+    private var encoderBackend = if (computeMode == ComputeMode.AUTO) "NNAPI requested; execution unverified" else "CPU"
 
     init {
         require(beamSize == 5 || beamSize == 50)
         try {
+            fun createEncoder(nnapi: Boolean): OrtSession = OrtSession.SessionOptions().use { options ->
+                options.setIntraOpNumThreads(4)
+                options.setInterOpNumThreads(1)
+                if (nnapi) options.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED))
+                if (computeMode == ComputeMode.AUTO && profileDirectory != null) {
+                    val prefix = try { File.createTempFile("ort-profile-", ".tmp", profileDirectory) } catch (_: Exception) { null }
+                    if (prefix != null) try {
+                        options.enableProfiling(prefix.absolutePath)
+                        profilePrefix = prefix
+                    } catch (_: Exception) { cleanProfile(prefix) }
+                }
+                try { environment.createSession(files.encoder.absolutePath, options) } catch (error: Throwable) {
+                    profilePrefix?.let { cleanProfile(it) }
+                    profilePrefix = null
+                    throw error
+                }
+            }
+            encoder = sessions.add(if (computeMode == ComputeMode.AUTO) {
+                try { createEncoder(true) } catch (_: Exception) { createEncoder(false) }
+            } else createEncoder(false))
             OrtSession.SessionOptions().use { options ->
                 options.setIntraOpNumThreads(4)
                 options.setInterOpNumThreads(1)
-                encoder = sessions.add(environment.createSession(files.encoder.absolutePath, options))
                 cross = sessions.add(environment.createSession(files.cross.absolutePath, options))
                 decoder = sessions.add(environment.createSession(files.decoder.absolutePath, options))
                 gather = sessions.add(environment.createSession(files.cacheGather.absolutePath, options))
@@ -38,11 +66,45 @@ internal class FlareBeamDecoder(
             }
         } catch (error: Throwable) {
             try { sessions.close() } catch (closeError: Throwable) { error.addSuppressed(closeError) }
+            profilePrefix?.let { cleanProfile(it) }
+            profilePrefix = null
             throw error
         }
     }
 
-    override fun close() = sessions.close()
+    override fun close() {
+        try { finishProfiling(false) } finally { sessions.close() }
+    }
+
+    private fun finishProfiling(completed: Boolean) {
+        val prefix = profilePrefix ?: return
+        profilePrefix = null
+        try {
+            val result = File(encoder.endProfiling())
+            if (completed && result.parentFile == prefix.parentFile && result.name.startsWith(prefix.name + "_") && result.name.endsWith(".json")) {
+                val diagnostics = parseComputeProfile(result.readText())
+                encoderBackend = diagnostics.label
+                Log.i("StilltypeCompute", "Quality encoder ORT node events: NNAPI=${diagnostics.nnapiNodes}, CPU=${diagnostics.cpuNodes}, complete=${diagnostics.complete}")
+            }
+        } catch (_: Exception) {
+            // Profiling must not mask recognition or close failures.
+        } finally { cleanProfile(prefix) }
+    }
+
+    private fun cleanProfile(prefix: File) {
+        try {
+            val files = prefix.parentFile?.listFiles()
+            if (files == null) {
+                Log.w("StilltypeCompute", "Could not inspect temporary ORT profile directory")
+                return
+            }
+            for (file in files) {
+                if (file == prefix || (file.name.startsWith(prefix.name + "_") && file.name.endsWith(".json"))) {
+                    if (!file.delete()) Log.w("StilltypeCompute", "Could not delete temporary ORT profile")
+                }
+            }
+        } catch (_: Exception) { Log.w("StilltypeCompute", "Could not delete temporary ORT profile") }
+    }
 
     fun decode(face: FloatArray, lip: FloatArray, frames: Int, checkCancelled: () -> Unit = {}): FlareBeamOutput {
         require(frames in 1..200 && face.size == frames * 88 * 88 && lip.size == face.size)
@@ -71,6 +133,7 @@ internal class FlareBeamDecoder(
             var start = System.nanoTime()
             encoder.run(feeds).use { encodedResult ->
                 encoderMs = elapsed(start)
+                finishProfiling(true)
                 val encoded = output(encodedResult, "encoder_out", OnnxJavaType.FLOAT, longArrayOf(frames.toLong(), 1, 512))
                 finite(encoded.floatBuffer, "encoder_out")
                 val mask = output(encodedResult, "encoder_padding_mask", OnnxJavaType.BOOL, longArrayOf(1, frames.toLong()))
@@ -191,7 +254,7 @@ internal class FlareBeamDecoder(
                                     }
                                     if (done) {
                                         checkCancelled()
-                                        return FlareBeamOutput(finalized.maxByOrNull { it.score }!!.tokens, FlareBeamTimings(encoderMs, crossMs, decoderMs, gatherMs, mergeMs, copyMs, selectionMs, elapsed(loopStart), calls, maximumRows))
+                                        return FlareBeamOutput(finalized.maxByOrNull { it.score }!!.tokens, FlareBeamTimings(encoderMs, crossMs, decoderMs, gatherMs, mergeMs, copyMs, selectionMs, elapsed(loopStart), calls, maximumRows), "$encoderBackend encoder; CPU decoder")
                                     }
                                     prefixes = selected.map { prefixes[it.parent] + it.word.toLong() }
                                     cumulative = FloatArray(beamSize) { selected[it].score }

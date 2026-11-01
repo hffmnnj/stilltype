@@ -11,13 +11,19 @@ import android.util.Log
 import com.stilltype.android.core.ComputeMode
 import com.stilltype.android.core.FrameAnalysis
 import com.stilltype.android.core.InstalledModels
+import com.stilltype.android.core.InstalledQualityModels
+import com.stilltype.android.core.ImagePoint
 import com.stilltype.android.core.MAX_SESSION_FRAMES
 import com.stilltype.android.core.MAX_SESSION_SECONDS
 import com.stilltype.android.core.MODEL_CHUNK_SECONDS
 import com.stilltype.android.core.ModelRepository
 import com.stilltype.android.core.MouthFrame
+import com.stilltype.android.core.QualityFrameAccumulator
+import com.stilltype.android.core.QualityModelRepository
+import com.stilltype.android.core.RecognitionProgress
 import com.stilltype.android.core.RecognitionResult
 import com.stilltype.android.core.VisualRecognizer
+import com.stilltype.android.data.checkQualityMemory
 import java.io.File
 import java.nio.FloatBuffer
 import java.util.EnumSet
@@ -35,7 +41,11 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 
 /** Local-only visual recognition using installed, repository-verified model assets. */
-class AndroidRecognizer(context: Context, private val models: ModelRepository) : VisualRecognizer {
+class AndroidRecognizer(
+    context: Context,
+    private val models: ModelRepository,
+    private val qualityModels: QualityModelRepository? = null,
+) : VisualRecognizer {
     private val lock = Any()
     private val env = OrtEnvironment.getEnvironment()
     private var analyzer: FaceAnalyzer? = null
@@ -45,9 +55,17 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
     private var detectorDirectory: File? = null
     private var provider = "CPU"
     private val profileDirectory = context.applicationContext.cacheDir
+    private val appContext = context.applicationContext
     private var profilePrefix: File? = null
+    private var qualityDecoder: FlareBeamDecoder? = null
+    private var qualityDirectory: File? = null
+    private var qualityMode: ComputeMode? = null
 
-    override fun analyze(bitmap: Bitmap, timestampMs: Long): FrameAnalysis = synchronized(lock) {
+    override fun analyze(bitmap: Bitmap, timestampMs: Long): FrameAnalysis = analyzeFrame(bitmap, timestampMs, false)
+
+    override fun analyzeForQuality(bitmap: Bitmap, timestampMs: Long): FrameAnalysis = analyzeFrame(bitmap, timestampMs, true)
+
+    private fun analyzeFrame(bitmap: Bitmap, timestampMs: Long, quality: Boolean): FrameAnalysis = synchronized(lock) {
         try {
             val installed = models.installedModels() ?: return@synchronized FrameAnalysis(hint = "Install the model to begin")
             if (analyzer == null || detectorDirectory != installed.directory) {
@@ -56,9 +74,139 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
                 analyzer = FaceAnalyzer(installed.directory, env)
                 detectorDirectory = installed.directory
             }
-            analyzer!!.analyze(bitmap, timestampMs)
+            analyzer!!.analyze(bitmap, timestampMs, quality)
         } catch (error: Exception) {
             FrameAnalysis(hint = "Face detector unavailable: ${error.message ?: "unknown error"}")
+        }
+    }
+
+    override fun createQualityAccumulator(): QualityFrameAccumulator? {
+        val installed = models.installedModels() ?: return null
+        val points = JSONArray(File(installed.directory, "mean-face.json").readText())
+        require(points.length() == 4) { "Invalid alignment reference" }
+        return CenteredFaceAligner(List(4) { index ->
+            val point = points.getJSONArray(index)
+            ImagePoint(point.getDouble(0).toFloat(), point.getDouble(1).toFloat())
+        })
+    }
+
+    /** Includes Fast gating, model loading, preprocessing, and decoding in inferenceMs. */
+    override suspend fun recognizeQuality(
+        frames: List<MouthFrame>,
+        compute: ComputeMode,
+        onProgress: (RecognitionProgress) -> Unit,
+    ): RecognitionResult = withContext(Dispatchers.Default) {
+        val context = coroutineContext
+        val started = System.nanoTime()
+        val duration = if (frames.size >= 2) frames.last().timestampMs - frames.first().timestampMs else 0L
+        fun result(text: String = "", backend: String = "", error: String? = null) = RecognitionResult(
+            text, text, max(0L, duration), (System.nanoTime() - started) / 1_000_000, frames.size, backend, error,
+        )
+        try {
+            if (frames.isEmpty()) return@withContext result(error = "no-face")
+            if (duration <= 0 || frames.any { it.pixels.size != 96 * 96 } ||
+                frames.zipWithNext().any { (a, b) -> b.timestampMs <= a.timestampMs } ||
+                sessionLimitError(frames.size, duration) != null) return@withContext result(error = "invalid-clip")
+            if (duration < 500) return@withContext result(error = "too-short")
+            if (frames.any { it.quality?.let { crops -> crops.face.size == 96 * 96 && crops.lip.size == 96 * 96 } != true }) {
+                return@withContext result(error = "quality-crops-missing")
+            }
+            context.ensureActive()
+            val memory = checkQualityMemory(appContext)
+            val memoryReason = memory.unavailableReason ?: if (memory.lowMemory) {
+                "The device is currently low on memory. Try again later or use Fast."
+            } else null
+            if (memoryReason != null) {
+                return@withContext result(backend = "Quality decoder not run: $memoryReason", error = "quality-memory-low")
+            }
+            val installed = synchronized(lock) { qualityModels?.installedModels() }
+                ?: return@withContext result(error = "quality-models-missing")
+            val chunks = partitionWindows(frames, MODEL_CHUNK_SECONDS * 1000L)
+            val parts = mutableListOf<String>()
+            var backend = "Quality decoder not run (Fast activity veto)"
+            for ((index, chunk) in chunks.withIndex()) {
+                context.ensureActive()
+                // Callback is outside this lock: capture cancellation must not invert lock order.
+                val window = synchronized(lock) {
+                    context.ensureActive()
+                    val gate = recognizeLocked(chunk, compute, context)
+                    when {
+                        gate.error == "no-speech" -> null
+                        gate.error != null -> throw QualityGateException(gate.error)
+                        gate.raw.isBlank() -> null
+                        else -> {
+                            val input = qualityInput(chunk)
+                            val output = getQualityDecoder(installed, compute).decode(input.first, input.second, input.third) { context.ensureActive() }
+                            val manifest = installed.manifest
+                            val text = output.tokenIds.mapNotNull { id ->
+                                require(id >= 0 && id < manifest.symbols.size) { "Invalid Quality token ID" }
+                                when (id.toInt()) {
+                                    manifest.bosId, manifest.padId, manifest.eosId -> null
+                                    manifest.unkId -> "<unk>"
+                                    else -> manifest.symbols[id.toInt()]
+                                }
+                            }.joinToString("").replace("▁", " ").trim()
+                            text to output.backend
+                        }
+                    }
+                }
+                context.ensureActive()
+                if (window != null) {
+                    if (window.first.isNotBlank()) parts.add(window.first)
+                    backend = window.second
+                }
+                onProgress(RecognitionProgress(index + 1, chunks.size))
+            }
+            context.ensureActive()
+            val joined = parts.joinToString(" ").trim()
+            if (joined.isEmpty()) result(backend = backend, error = "no-speech") else result(joined, backend)
+        } catch (error: OutOfMemoryError) {
+            // Release owned native sessions before reporting the failure; close resets them for a later retry.
+            try { close() } catch (_: Exception) { } catch (_: OutOfMemoryError) { }
+            result(error = "quality-memory-low")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: QualityGateException) {
+            result(error = "quality-gate-failed: ${error.code}")
+        } catch (error: Exception) {
+            result(error = "quality-recognition-failed: ${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
+    private class QualityGateException(val code: String) : Exception(code)
+
+    private fun qualityInput(chunk: List<MouthFrame>): Triple<FloatArray, FloatArray, Int> {
+        require(chunk.size >= 2)
+        val fps = (chunk.size - 1) * 1000.0 / (chunk.last().timestampMs - chunk.first().timestampMs)
+        val count = min(200, max(1, if (abs(fps - 25.0) > 0.5) round(chunk.size * 25.0 / fps).toInt() else chunk.size))
+        val face = FloatArray(count * 88 * 88)
+        val lip = FloatArray(face.size)
+        for (i in 0 until count) {
+            val index = if (count == 1) 0 else round(i.toDouble() * (chunk.size - 1) / (count - 1)).toInt()
+            val crops = requireNotNull(chunk[index].quality)
+            for (y in 0 until 88) for (x in 0 until 88) {
+                val src = (y + 4) * 96 + x + 4
+                val dst = i * 88 * 88 + y * 88 + x
+                face[dst] = (((crops.face[src].toInt() and 255) / 255f) - 0.421f) / 0.165f
+                lip[dst] = (((crops.lip[src].toInt() and 255) / 255f) - 0.421f) / 0.165f
+            }
+        }
+        return Triple(face, lip, count)
+    }
+
+    private fun getQualityDecoder(installed: InstalledQualityModels, mode: ComputeMode): FlareBeamDecoder {
+        if (qualityDecoder != null && qualityDirectory == installed.directory && qualityMode == mode) return qualityDecoder!!
+        qualityDecoder?.close()
+        qualityDecoder = null
+        qualityDirectory = null
+        qualityMode = null
+        val directory = installed.directory
+        val files = FlareGraphFiles(File(directory, "encoder.onnx"), File(directory, "cross.onnx"),
+            File(directory, "decoder-beam.onnx"), File(directory, "cache-gather.onnx"), File(directory, "cache-merge.onnx"))
+        return FlareBeamDecoder(env, files, 50, mode, profileDirectory).also {
+            qualityDecoder = it
+            qualityDirectory = directory
+            qualityMode = mode
         }
     }
 
@@ -237,6 +385,11 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
                     recognition = null
                     sessionDirectory = null
                     sessionMode = null
+                    try { qualityDecoder?.close() } finally {
+                        qualityDecoder = null
+                        qualityDirectory = null
+                        qualityMode = null
+                    }
                 }
             }
         }
