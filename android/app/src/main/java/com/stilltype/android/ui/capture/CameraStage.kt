@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.stilltype.android.core.FrameCadence
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -82,9 +83,9 @@ fun CameraStage(
                     }
                 }
                 preview.surfaceProvider = previewView.surfaceProvider
-                val frameGate = FrameGate()
+                val cadence = FrameCadence()
                 analysis.setAnalyzer(executor) { image ->
-                    analyze(image, frameGate, currentSink.value)
+                    analyze(image, cadence, currentSink.value)
                 }
                 cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
             } catch (e: Exception) {
@@ -106,17 +107,15 @@ fun CameraStage(
     )
 }
 
-private class FrameGate {
-    var lastAcceptedMs = 0L
-}
-
-/** Samples at most 25 fps on a monotonic clock and always closes the proxy. */
-private fun analyze(image: ImageProxy, gate: FrameGate, sink: FrameSink) {
+/**
+ * Targets 25 fps with phase-preserving selection on a monotonic clock (individual
+ * accepted intervals can be shorter than 40 ms) and always closes the proxy.
+ */
+private fun analyze(image: ImageProxy, cadence: FrameCadence, sink: FrameSink) {
     try {
         val session = sink.session
         val now = SystemClock.elapsedRealtime()
-        if (session == 0L || now - gate.lastAcceptedMs < MIN_FRAME_INTERVAL_MS) return
-        gate.lastAcceptedMs = now
+        if (session == 0L || !cadence.shouldAccept(now)) return
         val upright = image.toUprightBitmap()
         try {
             sink.onFrame(session, upright, now)
@@ -139,5 +138,3 @@ private fun ImageProxy.toUprightBitmap(): Bitmap {
     if (rotated !== raw) raw.recycle()
     return rotated
 }
-
-private const val MIN_FRAME_INTERVAL_MS = 40L
