@@ -104,6 +104,16 @@ python tools/evaluate_lipreading.py --manifest /path/evaluation/manifest.json \
   --output /path/evaluation/ctc-prefix10.json
 ```
 
+`--activity-gate ctc-evidence` measures the Android 0.1.2 speech gate with
+either CTC decoder. It uses motion threshold 4 for context, with the original
+threshold 8 as the strong-speech check. A window that fails the strong check
+also needs two collapsed nonblank/non-EOS greedy CTC emissions, mean emission
+probability at least 0.30, and nonblank text. Prefix search does not supply this
+evidence; it comes from the same model output's greedy path. Both motion spans
+require 0.3 seconds of movement and use 0.4-second padding. Non-finite output
+fails recognition. The evaluator defaults to `legacy` for reproducible baseline
+comparisons; the flag is not supported for desktop or score-only runs.
+
 For independently captured predictions, use `--score-predictions /path/preds.json`.
 That file contains an `items` array with `id`, `raw` and `error` (null on success).
 IDs must cover the selected split exactly. This mode needs no torch, ORT or
@@ -173,3 +183,34 @@ four intra-op threads and one inter-op thread, with OpenCV 4.11 preprocessing.
 These results are not Android device measurements, paper reproductions, or
 silent-mouthing accuracy. A stronger open-speech evaluation and a separately
 consented silent-mouthing set are needed before choosing new app defaults.
+
+## CTC activity-gate improvement
+
+Android 0.1.2 adopts the evidence gate above, rather than admitting weak motion
+alone. This addresses falsely rejected speech; it does not resolve visually
+ambiguous words. The fixed original split and a further frozen 40-clip set gave:
+
+| Host INT8 greedy | Development, 120 words | Test, 120 words | Confirmation, 240 words |
+| --- | ---: | ---: | ---: |
+| Original gate | 106/120 = 88.33% | 115/120 = 95.83% | 223/240 = 92.92% |
+| CTC evidence gate | 93/120 = 77.50% | 97/120 = 80.83% | 204/240 = 85.00% |
+
+All rejected clips remain in the scores. The candidate rejected no speech clips
+in these sets and admitted none of the 27 development quiet controls. Those
+controls are limited evidence, not a general false-activation guarantee. Test
+word errors fell by 15.65%, and confirmation errors by 8.52% relative to the
+original gate: **neither is the requested halving**. No exact sentence was
+recognized in the original test split.
+
+The additional set used 20 new IDs from each of the same two GRID speakers,
+excluding the original 40 IDs, selected with `random.Random(20261102 + speaker)`
+before candidate tuning. Its manifest SHA-256 is
+`00cff9dab43546d9bc867603b31fc0a005803e7ad8e1e1c5a6139a11cd1ea021`.
+The set is disjoint, not a new population of speakers. Model weights and text
+references were not changed or supplied as recognition hints.
+
+Real API 36 emulator QA also exercised a legacy-rejected speech ROI, a weak-motion
+quiet ROI, and a 120-second / 3,001-frame repeated-ROI session through the Android
+recognizer. Speech became nonempty, quiet remained `no-speech`, and the full
+session completed. The short speech fixture still had 5 errors in 6 words; this
+is pipeline evidence, not accurate dictation or physical-phone verification.

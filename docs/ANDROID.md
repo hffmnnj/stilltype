@@ -20,7 +20,7 @@ the Android companion.
 | Shell | Tauri 2 Rust shell + React frontend (`src/`, `src-tauri/`) | Native Kotlin, Compose Material 3 (`android/app/src/main/java/com/stilltype/android/`) |
 | Recognition | Private Python 3.12 worker over stdio (`engine/`), beam search, CUDA/MPS/CPU | On-device ONNX Runtime (`onnxruntime-android:1.24.3`), greedy CTC argmax in bounded 200-frame inference windows |
 | Face tracking | JS/WASM YuNet in the browser view | Same pinned `yunet-2026may.onnx` via ORT + OpenCV (`engine/FaceAnalyzer.kt`), per-frame affine warp — no temporal smoothing (desktop smooths landmarks over a centered 13-frame window in `engine/inference.py:align_mouths`) |
-| Speech gate | Desktop motion gate | Capture requires faces in >= 50% of observed frames (`ui/capture/CaptureViewModel.kt`), plus the shared motion-based speech span (`engine/AndroidRecognizer.kt:speechSpan`) |
+| Speech gate | Desktop motion gate | Capture requires faces in >= 50% of observed frames (`ui/capture/CaptureViewModel.kt`), then motion plus greedy CTC evidence for weak-motion windows (`engine/AndroidRecognizer.kt:activitySpans`) |
 | Compute setting | `settings.inferenceDevice` (`auto` \| `gpu` \| `cpu`) | `ComputeMode` (`AUTO` \| `CPU`) in the shared contract (`core/Contracts.kt`) |
 | Storage | Tauri app-data directory | Local DataStore `stilltype/state.json`, FileProvider export from `cacheDir/exports` |
 
@@ -225,6 +225,28 @@ adb logcat -s StilltypeBenchmark
 
 Use `adb -s SERIAL` when more than one device is connected. The debug-only
 `run-as` transfer keeps the public fixture out of the repository and APK.
+
+### Weak-motion regression (0.1.2)
+
+The CTC evidence gate recovers some speech rejected by the old motion gate,
+without admitting weak motion alone. Host WER and quiet-control results are in
+[RECOGNITION.md](RECOGNITION.md#ctc-activity-gate-improvement); they are not phone
+accuracy measurements. Two-minute sessions and CPU/Auto selection remain.
+
+`MobileBenchmarkTest#weakMotionSpeechAndQuiet_useRealRecognizer` exercises the
+real recognizer with two app-private fixtures. Transfer
+`activity-gate-fixtures.json`, `activity-gate-speech.raw`, and
+`activity-gate-quiet.raw` using the same `run-as` method above. Each metadata
+entry (`speech`, `quiet`) has `format: "uint8-96x96"` and `timestampsMs` at
+40 ms intervals, with 14–200 frames. The corresponding raw file concatenates
+unsigned 96×96 grayscale frames. Both fixtures must pass motion 4 and fail
+motion 8; the test rejects a fixture that does not exercise that regression.
+
+The API 36 emulator passed speech acceptance, quiet rejection, and a repeated
+3,001-frame / 120,000 ms session. Results are written to app-private
+`activity-gate-results.json`, not logcat. This proves routing and bounds, not
+correct words: the short fixture still had 5 word errors out of 6. The Pixel
+9 Pro Fold has not run this test.
 
 ## Compute notes
 

@@ -24,6 +24,7 @@ import java.util.EnumSet
 import kotlin.coroutines.CoroutineContext
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
@@ -100,8 +101,8 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
                 if (bounded.size < 2) continue
                 if (bounded.last().timestampMs - bounded.first().timestampMs <= 0) continue
                 val fps = (bounded.size - 1) * 1000.0 / (bounded.last().timestampMs - bounded.first().timestampMs)
-                val span = speechSpan(bounded, fps) ?: continue
-                hadSpeech = true
+                val spans = activitySpans(bounded, fps)
+                val span = spans.candidate ?: continue
                 val selected = bounded.subList(span.first, span.second)
                 if (selected.size < 1) continue
                 val outCount = if (abs(fps - 25.0) > 0.5) max(1, round(selected.size * 25.0 / fps).toInt()) else selected.size
@@ -117,26 +118,13 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
                 }
                 val started = System.nanoTime()
                 var completed = false
-                val text = try {
+                val decoded = try {
                     val decoded = OnnxTensor.createTensor(env, FloatBuffer.wrap(input), longArrayOf(1, n.toLong(), 88, 88)).use { tensor ->
                         session.run(mapOf(installed.manifest.inputName to tensor)).use { result ->
                             val logits = result.get(installed.manifest.outputName).orElseThrow { IllegalStateException("Missing logits") } as OnnxTensor
                             val shape = (logits.info as TensorInfo).shape
                             require(shape.contentEquals(longArrayOf(1, n.toLong(), tokens.size.toLong()))) { "Invalid CTC output shape" }
-                            val values = logits.floatBuffer
-                            var previous = -1
-                            val words = StringBuilder()
-                            repeat(n) {
-                                var best = 0
-                                var score = Float.NEGATIVE_INFINITY
-                                for (id in tokens.indices) {
-                                    val value = values.get()
-                                    if (value > score) { score = value; best = id }
-                                }
-                                if (best != previous && best != installed.manifest.blankId && best != installed.manifest.eosId) words.append(tokens[best])
-                                previous = best
-                            }
-                            words.toString().replace("▁", " ").trim()
+                            decodeCtc(logits.floatBuffer, n, tokens, installed.manifest.blankId, installed.manifest.eosId)
                         }
                     }
                     totalMs += (System.nanoTime() - started) / 1_000_000
@@ -145,7 +133,9 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
                 } finally {
                     finishProfiling(session, completed)
                 }
-                if (text.isNotEmpty()) parts.add(text)
+                if (spans.strong == null && !decoded.hasActivityEvidence()) continue
+                hadSpeech = true
+                if (decoded.text.isNotEmpty()) parts.add(decoded.text)
             }
             if (!hadSpeech) return failure("no-speech")
             val joined = parts.joinToString(" ").trim()
@@ -254,10 +244,14 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
 }
 
 /** The desktop motion gate: mean-removed inner-mouth difference, lagged and smoothed. */
-internal fun speechSpan(frames: List<MouthFrame>, fps: Double): Pair<Int, Int>? {
-    if (frames.size < 2 || !fps.isFinite() || fps <= 0) return null
+internal data class ActivitySpans(val strong: Pair<Int, Int>?, val candidate: Pair<Int, Int>?)
+
+internal fun speechSpan(frames: List<MouthFrame>, fps: Double): Pair<Int, Int>? = activitySpans(frames, fps).strong
+
+internal fun activitySpans(frames: List<MouthFrame>, fps: Double): ActivitySpans {
+    if (frames.size < 2 || !fps.isFinite() || fps <= 0) return ActivitySpans(null, null)
     val lag = max(1, round(fps * 0.1).toInt())
-    if (frames.size <= lag) return null
+    if (frames.size <= lag) return ActivitySpans(null, null)
     val means = DoubleArray(frames.size)
     for (i in frames.indices) {
         var sum = 0.0
@@ -276,17 +270,48 @@ internal fun speechSpan(frames: List<MouthFrame>, fps: Double): Pair<Int, Int>? 
     }
     for (i in 0 until lag) motion[i] = motion[lag]
     val width = max(1, (fps * 0.2).toInt())
-    val moving = frames.indices.filter { i ->
+    val smoothed = DoubleArray(frames.size) { i ->
         var total = 0.0
         for (j in 0 until width) {
             val index = i + (width - 1) / 2 - j
             if (index in motion.indices) total += motion[index]
         }
-        total / width > 8.0
+        total / width
     }
-    if (moving.size < 0.3 * fps) return null
-    val padding = (0.4 * fps).toInt()
-    return max(0, moving.first() - padding) to minOf(frames.size, moving.last() + 1 + padding)
+    fun span(threshold: Double): Pair<Int, Int>? {
+        val moving = frames.indices.filter { smoothed[it] > threshold }
+        if (moving.size < 0.3 * fps) return null
+        val padding = (0.4 * fps).toInt()
+        return max(0, moving.first() - padding) to minOf(frames.size, moving.last() + 1 + padding)
+    }
+    return ActivitySpans(span(8.0), span(4.0))
+}
+
+internal data class CtcDecode(val text: String, val emissions: Int, val meanProbability: Double) {
+    fun hasActivityEvidence(): Boolean = text.isNotBlank() && emissions >= 2 && meanProbability >= 0.30
+}
+
+internal fun decodeCtc(values: FloatBuffer, frames: Int, tokens: List<String>, blank: Int, eos: Int): CtcDecode {
+    var previous = -1
+    var count = 0
+    var probabilitySum = 0.0
+    val words = StringBuilder()
+    repeat(frames) {
+        var best = 0
+        var score = Float.NEGATIVE_INFINITY
+        for (id in tokens.indices) {
+            val value = values.get()
+            require(value.isFinite()) { "Non-finite CTC output" }
+            if (value > score) { score = value; best = id }
+        }
+        if (best != previous && best != blank && best != eos) {
+            words.append(tokens[best])
+            count++
+            probabilitySum += exp(score.toDouble())
+        }
+        previous = best
+    }
+    return CtcDecode(words.toString().replace("▁", " ").trim(), count, if (count == 0) 0.0 else probabilitySum / count)
 }
 
 /** True when a session exceeds the user recording limit (120 s / 3001 frames). */

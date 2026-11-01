@@ -33,6 +33,52 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class MobileBenchmarkTest {
     @Test
+    fun weakMotionSpeechAndQuiet_useRealRecognizer() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val models = (context.applicationContext as StilltypeApplication).models
+        models.prepareBundled()
+        assertNotNull("Bundled model preparation failed: ${models.status.value.error}", models.installedModels())
+        val metadata = JSONObject(File(context.filesDir, "activity-gate-fixtures.json").readText())
+        fun fixture(name: String): List<MouthFrame> {
+            val info = metadata.getJSONObject(name)
+            assertEquals("uint8-96x96", info.getString("format"))
+            val timestamps = info.getJSONArray("timestampsMs")
+            assertTrue("Fixture needs 14..200 frames", timestamps.length() in 14..200)
+            val pixels = File(context.filesDir, "activity-gate-$name.raw").readBytes()
+            assertEquals(timestamps.length() * 96 * 96, pixels.size)
+            val frames = List(timestamps.length()) { i ->
+                MouthFrame(pixels.copyOfRange(i * 96 * 96, (i + 1) * 96 * 96), timestamps.getLong(i))
+            }
+            assertTrue("Fixture must be sampled at 25 fps", frames.zipWithNext().all { (a, b) -> b.timestampMs - a.timestampMs == 40L })
+            val spans = activitySpans(frames, 25.0)
+            assertNull("Fixture must fail the strong gate", spans.strong)
+            assertNotNull("Fixture must pass the candidate gate", spans.candidate)
+            return frames
+        }
+        val speech = fixture("speech")
+        val quiet = fixture("quiet")
+        AndroidRecognizer(context, models).use { recognizer ->
+            val spoken = recognizer.recognize(speech, ComputeMode.CPU)
+            assertNull("Weak-motion speech failed: ${spoken.error}", spoken.error)
+            assertTrue("Weak-motion speech must produce text", spoken.raw.isNotBlank())
+            val silence = recognizer.recognize(quiet, ComputeMode.CPU)
+            assertEquals("no-speech", silence.error)
+            assertTrue(silence.raw.isEmpty())
+            val longFrames = List(3001) { i -> MouthFrame(speech[i % speech.size].pixels, i * 40L) }
+            val long = recognizer.recognize(longFrames, ComputeMode.CPU)
+            assertNull("Long session failed: ${long.error}", long.error)
+            assertEquals(3001, long.frames)
+            assertEquals(120_000L, long.durationMs)
+            File(context.filesDir, "activity-gate-results.json").writeText(
+                JSONObject().put("speechRaw", spoken.raw).put("quietError", silence.error)
+                    .put("longRaw", long.raw).put("longFrames", long.frames).put("longDurationMs", long.durationMs).toString(),
+            )
+            instrumentation.sendStatus(0, Bundle().apply { putString("stilltypeActivityGate", "speech accepted; quiet rejected; 120-second session completed") })
+        }
+    }
+
+    @Test
     fun autoRecognizer_reportsExecutionEvidenceForRealModel() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

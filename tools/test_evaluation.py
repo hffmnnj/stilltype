@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -272,6 +273,70 @@ class AdapterSeparationTest(unittest.TestCase):
         scored = ev.score_pair(secret, raw, error)
         self.assertEqual(scored["normalizedHypothesis"], "hello world")
         self.assertNotIn("something", scored["normalizedHypothesis"])
+
+
+class CtcActivityGateTest(unittest.TestCase):
+    def test_weak_motion_veto_uses_greedy_evidence_even_for_prefix_decoder(self):
+        import numpy as np
+
+        from activity_gate import greedy_evidence, admits
+
+        tokens = ["<blank>", "a", "b", "<eos>"]
+        def output(ids, probability=0.8):
+            rows = np.full((1, len(ids), len(tokens)), -10.0, dtype=np.float32)
+            for i, token in enumerate(ids):
+                rows[0, i, token] = np.log(probability)
+            return rows
+
+        self.assertFalse(admits(greedy_evidence(output([1, 1]), tokens)))
+        self.assertTrue(admits(greedy_evidence(output([1, 0, 1]), tokens)))
+        self.assertFalse(admits(greedy_evidence(output([1, 2], 0.2), tokens)))
+
+        class Session:
+            def __init__(self, logits):
+                self.logits = logits
+                self.calls = 0
+            def run(self, names, feed):
+                self.calls += 1
+                return [self.logits]
+
+        class Video:
+            def numpy(self):
+                return np.zeros((1, 25, 88, 88), dtype=np.float32)
+
+        motion = [5.0] * 25
+        fake = SimpleNamespace(
+            load_clip_records=lambda _: ([{"landmarks": 1}] * 25, 960),
+            fps_from_records=lambda _: 25.0,
+            check_clip=lambda *_: None,
+            _partition_windows=lambda records, _: [records],
+            decode_records=lambda _: (None, None),
+            align_mouths=lambda *_: np.zeros((25, 96, 96), dtype=np.uint8),
+            mouth_motion=lambda *_: motion,
+            USR2Visual=SimpleNamespace(to_input=lambda *_: Video()),
+        )
+        def predict(session):
+            return ev._predict_ctc_clip(fake, lambda *_: "prefix text", np, session, tokens,
+                                        Path("unused"), activity_gate="ctc-evidence")
+
+        self.assertEqual(predict(Session(output([1, 0, 1])))[:2], ("prefix text", None))
+        self.assertEqual(predict(Session(output([1, 1])))[:2], ("", "no-speech"))
+        motion[:] = [0.0] * 25
+        session = Session(output([1, 0, 1]))
+        self.assertEqual(predict(session)[:2], ("", "no-speech"))
+        self.assertEqual(session.calls, 0)
+        motion[:] = [9.0] * 25
+        self.assertEqual(predict(Session(output([1, 1])))[:2], ("prefix text", None))
+        bad = output([1, 0, 1])
+        bad[0, 0, 2] = np.nan
+        self.assertEqual(predict(Session(bad))[1], "recognition-failed: non-finite CTC output")
+
+    def test_gate_flag_rejects_non_ctc_and_score_only(self):
+        common = ["--manifest", "unused", "--split", "dev", "--output", "unused",
+                  "--activity-gate", "ctc-evidence"]
+        self.assertEqual(ev.main(common + ["--decoder", "desktop"]), 2)
+        self.assertEqual(ev.main(common + ["--decoder", "ctc-int8", "--score-predictions", "unused"]), 2)
+        self.assertEqual(ev.main(common + ["--decoder", "ctc-int8", "--motion-threshold", "4"]), 2)
 
 
 if __name__ == "__main__":
