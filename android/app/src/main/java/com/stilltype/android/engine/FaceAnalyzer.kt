@@ -5,6 +5,8 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.graphics.Bitmap
 import com.stilltype.android.core.FrameAnalysis
+import com.stilltype.android.core.AlignmentFrame
+import com.stilltype.android.core.ImagePoint
 import com.stilltype.android.core.MouthFrame
 import java.io.File
 import java.nio.FloatBuffer
@@ -57,7 +59,7 @@ internal class FaceAnalyzer(directory: File, private val env: OrtEnvironment) : 
         }
     }
 
-    fun analyze(bitmap: Bitmap, timestampMs: Long): FrameAnalysis {
+    fun analyze(bitmap: Bitmap, timestampMs: Long, quality: Boolean = false): FrameAnalysis {
         Utils.bitmapToMat(bitmap, source)
         rgba.create(480, 640, CvType.CV_8UC4)
         rgba.setTo(Scalar(0.0, 0.0, 0.0, 255.0))
@@ -100,8 +102,12 @@ internal class FaceAnalyzer(directory: File, private val env: OrtEnvironment) : 
             motion = (sum / pixels.size / 32.0).toFloat().coerceIn(0f, 1f)
         }
         previousMouth = pixels
+        val alignment = if (quality) AlignmentFrame(
+            ByteArray(640 * 480).also { gray.get(0, 0, it) }, 640, 480,
+            points.map { ImagePoint(it.x.toFloat(), it.y.toFloat()) },
+        ) else null
         return FrameAnalysis(MouthFrame(pixels, timestampMs), true, light, motion,
-            if (light < 0.25f) "More light" else "Ready to dictate")
+            if (light < 0.25f) "More light" else "Ready to dictate", alignment)
     }
 
     private fun decode(result: OrtSession.Result, width: Int, height: Int): Array<Point>? {

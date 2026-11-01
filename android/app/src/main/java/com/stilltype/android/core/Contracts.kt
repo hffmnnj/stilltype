@@ -107,7 +107,7 @@ interface ModelRepository {
     fun installedModels(): InstalledModels?
 }
 
-data class MouthFrame(val pixels: ByteArray, val timestampMs: Long)
+data class MouthFrame(val pixels: ByteArray, val timestampMs: Long, val quality: QualityCrops? = null)
 
 data class FrameAnalysis(
     val mouth: MouthFrame? = null,
@@ -115,6 +115,7 @@ data class FrameAnalysis(
     val brightness: Float = 0f,
     val motion: Float = 0f,
     val hint: String = "Face the camera",
+    val alignment: AlignmentFrame? = null,
 )
 
 data class RecognitionResult(

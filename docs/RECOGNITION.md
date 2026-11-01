@@ -659,3 +659,13 @@ accuracy cost on those admitted samples, not validated integrated quiet behavior
 The earlier CTC quiet controls used host desktop-aligned ROIs. Actual Android
 preprocessing and the combined pipeline still need direct checks; an ungated
 model switch remains inappropriate.
+
+A structural encoder probe replaced the two temporal 5D frontend convolutions
+with exact temporal slices of their unchanged constant kernels, 2D convolutions,
+zero padding/shifts and summation. On host CPU, finite encodings at 25, 136 and
+200 frames differed by at most 0.00000525 and padding masks matched. However,
+the candidate was about 8.5% slower on the 136-frame coordinator call. The earlier
+profile attributed only 1.14% of summed kernel time to those two convolutions;
+matrix multiplication dominated. No Android partitioning or GPU benefit was
+measured. The conversion was not adopted: removing unsupported operators alone
+does not establish a faster phone pipeline.
