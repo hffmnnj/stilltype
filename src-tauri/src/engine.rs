@@ -284,7 +284,7 @@ impl Worker {
             .map_err(|e| e.to_string())?;
         let line = self
             .rx
-            .recv_timeout(Duration::from_secs(180))
+            .recv_timeout(Duration::from_secs(900))
             .map_err(|e| format!("Worker stopped or timed out: {e}"))??;
         let response: Value =
             serde_json::from_str(&line).map_err(|e| format!("Invalid worker response: {e}"))?;

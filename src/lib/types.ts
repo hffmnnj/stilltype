@@ -108,7 +108,7 @@ export const defaultSettings: Settings = {
   shortcut: 'CommandOrControl+Shift+Space', dictationMode: 'toggle',
   autoPaste: false, keepHistory: true, retentionDays: 30,
   cleanupEnabled: false, cleanupModel: 'qwen3.5-0.8b-2026-q4',
-  pauseSeconds: 0.7, beamSize: 5, inferenceDevice: 'auto', maxClipSeconds: 30, context: '',
+  pauseSeconds: 0.7, beamSize: 5, inferenceDevice: 'auto', maxClipSeconds: 120, context: '',
 };
 /** Native command arguments and worker requests use camelCase payload fields. */
 export interface DesktopApi {

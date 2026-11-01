@@ -460,6 +460,38 @@ def fps_from_records(records: list[dict]) -> float:
     return (len(records) - 1) / span_s
 
 
+#: Longest single window handed to decode/align/model. Sessions up to two
+#: minutes are processed as sequential timestamp-balanced windows of at
+#: most this length, never as one giant array.
+CHUNK_WINDOW_MS = 8000.0
+
+
+def _partition_windows(records: list[dict], fps: float) -> list[list[dict]]:
+    """Split chronological records into equal-width time windows.
+
+    The covered span is last-first plus one frame interval; the window
+    count is ceil(span / 8000 ms) so every window covers at most 8 s and
+    the last chunk is a full-width window, never a tiny discarded tail.
+    Short clips (span <= 8 s) return a single window: existing behavior.
+    """
+    first = records[0]["timestamp"]
+    last = records[-1]["timestamp"]
+    interval = 1000.0 / fps if fps and fps > 0 else 1000.0 / FALLBACK_FPS
+    span = (last - first) + interval
+    if span <= 0:
+        return [records]
+    nwin = max(1, int(math.ceil(span / CHUNK_WINDOW_MS)))
+    if nwin == 1:
+        return [records]
+    width = span / nwin
+    windows: list[list[dict]] = [[] for _ in range(nwin)]
+    for r in records:
+        idx = int((r["timestamp"] - first) / width)
+        idx = min(max(idx, 0), nwin - 1)
+        windows[idx].append(r)
+    return [w for w in windows if w] or [records]
+
+
 def check_clip(n_frames: int, face_frames: int, fps: float) -> str | None:
     """Pre-decode gates. Returns an error code, or None when decodable."""
     if n_frames < max(1, fps * 0.5):
@@ -679,6 +711,13 @@ def transcribe_clip(
 ) -> dict:
     """Full pipeline: parse -> gates -> decode -> model -> vocab.
 
+    Clips longer than 8 s are split into sequential timestamp-balanced
+    windows of at most 8 s, each decoded and inferred separately with the
+    model loaded once; raw chunk texts join in order and vocabulary
+    applies once to the joined text. Duration/frames always describe the
+    full clip. Synthetic-model tests below prove this routing (late text
+    survives, windows stay bounded), not recognition accuracy.
+
     Clip problems return a result dict with `error` set (never raise).
     Only infrastructure failures raise ModelUnavailable. `model_factory`
     (taking beam size and device) exists for tests; production uses
@@ -720,34 +759,102 @@ def transcribe_clip(
         return {**empty, "durationMs": duration_ms, "frames": n, "error": err}
 
     device = resolve_device(requested_device(settings if isinstance(settings, dict) else None))
-    frames, lms = decode_records(records)
-    rois = align_mouths(frames, lms)
-    if rois is None:  # unreachable after the face gate; defensive
-        return {**empty, "durationMs": duration_ms, "frames": n, "error": "no-face"}
-    motion = mouth_motion(rois, fps)
-    span = speech_span(motion, fps)
-    if span is None:
-        return {**empty, "durationMs": duration_ms, "frames": n, "error": "no-speech"}
-    s0, s1 = int(span[0]), int(span[1])
-    if not final:
-        cut = first_pause(motion, fps, pause)
-        if cut is not None and cut > s0:
-            s1 = min(s1, cut + int(0.25 * fps))
+    windows = _partition_windows(records, fps)
+    if len(windows) == 1:
+        frames, lms = decode_records(records)
+        rois = align_mouths(frames, lms)
+        if rois is None:  # unreachable after the face gate; defensive
+            return {**empty, "durationMs": duration_ms, "frames": n, "error": "no-face"}
+        motion = mouth_motion(rois, fps)
+        span = speech_span(motion, fps)
+        if span is None:
+            return {**empty, "durationMs": duration_ms, "frames": n, "error": "no-speech"}
+        s0, s1 = int(span[0]), int(span[1])
+        if not final:
+            cut = first_pause(motion, fps, pause)
+            if cut is not None and cut > s0:
+                s1 = min(s1, cut + int(0.25 * fps))
+        factory = model_factory or ensure_model
+        model = factory(beam, device)
+        raw, vsr_ms = model(rois[s0:s1], fps) if s1 > s0 else ("", 0)
+        raw = raw or ""
+        pairs = vocab_pairs(vocabulary)
+        fixed = apply_vocabulary(raw.lower(), pairs) if raw else ""
+        text = (fixed[:1].upper() + fixed[1:]) if fixed else ""
+        if not raw:
+            text = ""
+        actual_device = getattr(model, "device", device)
+        return {
+            "text": text,
+            "raw": raw,
+            "durationMs": duration_ms,
+            "inferenceMs": int(vsr_ms),
+            "frames": n,
+            "error": None,
+            "device": actual_device,
+        }
+
+    # Long session: the same decode -> align -> motion-gate -> model
+    # stages, applied to sequential windows of at most 8 s so no giant
+    # array is ever built. The model loads once and is reused; raw chunk
+    # texts join in order and vocabulary applies once to the joined text
+    # so phrase replacements work across chunk boundaries.
     factory = model_factory or ensure_model
-    model = factory(beam, device)
-    raw, vsr_ms = model(rois[s0:s1], fps) if s1 > s0 else ("", 0)
-    raw = raw or ""
+    model = None
     pairs = vocab_pairs(vocabulary)
-    fixed = apply_vocabulary(raw.lower(), pairs) if raw else ""
+    raws: list[str] = []
+    vsr_total = 0
+    motions: list = []  # per-window motion of processed windows (final=false pause search)
+    for w in windows:
+        if sum(1 for r in w if r["landmarks"] is not None) < len(w) * 0.5:
+            continue  # faceless stretch: skip without inventing text
+        try:
+            frames_w, lms_w = decode_records(w)
+        except ClipError as e:
+            # A corrupt window must not silently become a partial success.
+            return {**empty, "durationMs": duration_ms, "frames": n, "error": e.code}
+        # ModelUnavailable and real model errors propagate: the worker maps
+        # them to ok:false, never to a successful partial transcript.
+        rois_w = align_mouths(frames_w, lms_w)
+        if rois_w is None:
+            continue
+        motion_w = mouth_motion(rois_w, fps)
+        span_w = speech_span(motion_w, fps)
+        stop_after = False
+        if not final:
+            base = sum(len(m) for m in motions)
+            motions.append(motion_w)
+            cut = first_pause(np.concatenate(motions), fps, pause)
+            if cut is not None:
+                if span_w is None:
+                    break  # pause runs through this quiet window: interim stops here
+                s0_w = int(span_w[0])
+                if cut <= base + s0_w:
+                    break  # pause precedes this window's speech: exclude it
+                span_w = (s0_w, min(int(span_w[1]), cut - base + int(0.25 * fps)))
+                stop_after = True
+        if span_w is None:
+            continue
+        s0_w, s1_w = int(span_w[0]), int(span_w[1])
+        if model is None:
+            model = factory(beam, device)
+        raw_w, ms_w = model(rois_w[s0_w:s1_w], fps) if s1_w > s0_w else ("", 0)
+        if raw_w:
+            raws.append(raw_w)
+        vsr_total += int(ms_w)
+        if stop_after:
+            break
+    if not raws:
+        return {**empty, "durationMs": duration_ms, "frames": n, "error": "no-speech"}
+    joined = " ".join(raws)
+    fixed = apply_vocabulary(joined.lower(), pairs)
     text = (fixed[:1].upper() + fixed[1:]) if fixed else ""
-    if not raw:
-        text = ""
-    actual_device = getattr(model, "device", device)
+    actual_device = getattr(model, "device", device) if model is not None else device
     return {
         "text": text,
-        "raw": raw,
+        "raw": joined,
         "durationMs": duration_ms,
-        "inferenceMs": int(vsr_ms),
+        "inferenceMs": int(vsr_total),
         "frames": n,
         "error": None,
         "device": actual_device,

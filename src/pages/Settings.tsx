@@ -20,6 +20,7 @@ function RangeRow({
   max,
   step,
   unit,
+  format,
   onCommit,
   disabled,
 }: {
@@ -30,6 +31,7 @@ function RangeRow({
   max: number;
   step: number;
   unit?: string;
+  format?: (v: number) => string;
   onCommit: (v: number) => void;
   disabled?: boolean;
 }) {
@@ -60,7 +62,7 @@ function RangeRow({
           onKeyUp={commit}
           onBlur={commit}
         />
-        <output className="mono range-out" htmlFor={id}>{Number.isInteger(step) ? local : local.toFixed(1)}{unit}</output>
+        <output className="mono range-out" htmlFor={id}>{format ? format(local) : `${Number.isInteger(step) ? local : local.toFixed(1)}${unit ?? ''}`}</output>
       </div>
     </div>
   );
@@ -308,7 +310,7 @@ export function SettingsPage() {
           <OverlayRow />
           <RangeRow label="Beam size" hint="5 is a good balance. Larger beams use more memory and may be slower." value={settings.beamSize} min={1} max={60} step={1} onCommit={(v) => set({ beamSize: v })} />
           <RangeRow label="Pause length" hint="Silence that ends a phrase in toggle mode." value={settings.pauseSeconds} min={0.3} max={2} step={0.1} unit="s" onCommit={(v) => set({ pauseSeconds: v })} disabled={settings.dictationMode === 'hold'} />
-          <RangeRow label="Longest clip" hint="Recording stops by itself at this length." value={settings.maxClipSeconds} min={5} max={120} step={5} unit="s" onCommit={(v) => set({ maxClipSeconds: v })} />
+          <RangeRow label="Recording limit" hint="Recording stops automatically at this length. Two minutes is the longest." value={settings.maxClipSeconds} min={5} max={120} step={5} format={(v) => (v >= 60 ? `${Math.floor(v / 60)}:${String(v % 60).padStart(2, '0')}` : `${v}s`)} onCommit={(v) => set({ maxClipSeconds: v })} />
         </TabsContent>
 
         <TabsContent value="appearance">

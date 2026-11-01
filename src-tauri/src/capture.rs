@@ -8,7 +8,8 @@ use std::{
 };
 use uuid::Uuid;
 
-const MAX_FILE: u64 = 120 * 1024 * 1024;
+const MAX_FILE: u64 = 512 * 1024 * 1024;
+const MAX_FRAMES: usize = 3100;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Frame {
     pub jpeg: String,
@@ -73,7 +74,7 @@ impl Clips {
         if clip.busy {
             return Err("Clip is being transcribed".into());
         }
-        if frames.is_empty() || frames.len() > 256 || clip.frames + frames.len() > 3000 {
+        if frames.is_empty() || frames.len() > 256 || clip.frames + frames.len() > MAX_FRAMES {
             return Err("Invalid frame count".into());
         }
         let mut first = clip.first;
@@ -235,6 +236,72 @@ mod tests {
         assert!(repeat_rejected);
         assert!(invalid_landmarks_rejected);
         assert_eq!(lines, 1);
+    }
+    #[test]
+    fn two_minute_clip_accepted_and_over_limits_rejected() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let mut clips = Clips::default();
+        let id = clips.start(&dir).unwrap();
+        // 3001 frames at 25 fps: 0, 40, ..., 120000 ms. Each batch respects
+        // the 256-frame per-append limit and the 120 s duration limit.
+        let mut ts = 0.0;
+        let mut appended = 0;
+        while appended < 3001 {
+            let take = (3001 - appended).min(256);
+            let batch = (0..take)
+                .map(|_| {
+                    let f = Frame {
+                        jpeg: "/9j/2Q==".into(),
+                        timestamp: ts,
+                        landmarks: None,
+                    };
+                    ts += 40.0;
+                    f
+                })
+                .collect::<Vec<_>>();
+            clips.append(&dir, &id, batch, 120).unwrap();
+            appended += take;
+        }
+        assert_eq!(appended, 3001);
+        // One frame past the 120 s window is rejected by duration...
+        assert!(clips
+            .append(
+                &dir,
+                &id,
+                vec![Frame {
+                    jpeg: "/9j/2Q==".into(),
+                    timestamp: 120_040.0,
+                    landmarks: None,
+                }],
+                120
+            )
+            .is_err());
+        // ...and frames past the finite frame cap are rejected even when a
+        // generous duration limit would allow them.
+        let mut extra = 0;
+        let mut capped = false;
+        while extra < 200 {
+            let batch = (0..50)
+                .map(|_| {
+                    let f = Frame {
+                        jpeg: "/9j/2Q==".into(),
+                        timestamp: ts,
+                        landmarks: None,
+                    };
+                    ts += 1.0;
+                    f
+                })
+                .collect::<Vec<_>>();
+            if clips.append(&dir, &id, batch, 3600).is_err() {
+                capped = true;
+                break;
+            }
+            extra += 50;
+        }
+        assert!(capped, "frame cap must stay finite above 3001 frames");
+        clips.cancel(&dir, &id).unwrap();
+        assert!(!dir.join(id).exists());
+        fs::remove_dir(dir).unwrap();
     }
     #[test]
     fn cancellation_waits_for_active_reader_then_removes_clip() {

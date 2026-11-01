@@ -40,7 +40,7 @@ impl Default for Settings {
             pause_seconds: 0.7,
             beam_size: 5,
             inference_device: "auto".into(),
-            max_clip_seconds: 30,
+            max_clip_seconds: 120,
             context: String::new(),
         }
     }
@@ -56,7 +56,7 @@ impl Settings {
             || self.cleanup_model.len() > 256
             || self.context.len() > 8192
             || !(1..=60).contains(&self.beam_size)
-            || !(5..=60).contains(&self.max_clip_seconds)
+            || !(5..=120).contains(&self.max_clip_seconds)
             || self.retention_days > 3650
             || !self.pause_seconds.is_finite()
             || !(0.3..=3.0).contains(&self.pause_seconds)
@@ -111,7 +111,7 @@ impl HistoryEntry {
             || !date(&self.created_at)
             || self.text.len() > 100_000
             || self.raw.len() > 100_000
-            || self.duration_ms > 60_000
+            || self.duration_ms > 120_000
         {
             return Err("Invalid history entry".into());
         }
@@ -278,6 +278,37 @@ mod tests {
         assert!(persisted.data.history.is_empty());
         fs::remove_file(dir.join("state.json")).unwrap();
         fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn two_minute_session_limits_and_legacy_defaults_still_valid() {
+        let mut defaults = Settings::default();
+        assert_eq!(defaults.max_clip_seconds, 120);
+        defaults.validate().unwrap();
+        // Legacy saved settings (e.g. 30 s) must keep loading.
+        defaults.max_clip_seconds = 30;
+        defaults.validate().unwrap();
+        defaults.max_clip_seconds = 5;
+        defaults.validate().unwrap();
+        defaults.max_clip_seconds = 120;
+        defaults.validate().unwrap();
+        defaults.max_clip_seconds = 121;
+        assert!(defaults.validate().is_err());
+        defaults.max_clip_seconds = 4;
+        assert!(defaults.validate().is_err());
+
+        let mut entry = HistoryEntry {
+            id: Uuid::new_v4().to_string(),
+            text: "two minute session".into(),
+            raw: "".into(),
+            created_at: Utc::now().to_rfc3339(),
+            duration_ms: 120_000,
+            inference_ms: 1,
+            favorite: false,
+            words: 0,
+        };
+        entry.validate().unwrap();
+        entry.duration_ms = 120_001;
+        assert!(entry.validate().is_err());
     }
     #[test]
     fn csv_escapes_formulas_and_quotes() {

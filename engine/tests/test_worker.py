@@ -324,5 +324,145 @@ class VocabularyMapping(unittest.TestCase):
         self.assertEqual(inference.apply_vocabulary("hello world", []), "hello world")
 
 
+def _moving_rois(k):
+    import numpy as np
+
+    rois = np.full((k, 96, 96), 128, np.uint8)
+    for i in range(k):
+        if (i // 2) % 2 == 0:
+            rois[i, 24:72, 16:48] = 200
+            rois[i, 24:72, 48:80] = 60
+        else:
+            rois[i, 24:72, 16:48] = 60
+            rois[i, 24:72, 48:80] = 200
+    return rois
+
+
+class LongSessionChunking(unittest.TestCase):
+    """Two-minute sessions run as sequential windows of at most 8 s.
+
+    Synthetic-model tests proving routing, not recognition accuracy: the
+    motion/speech-span math is the real code, decode/align are stubbed at
+    the opencv boundary, and predictions are canned per-window strings.
+    A regression to whole-clip inference (or to truncating after the
+    first 8 s) fails these because late-window text would go missing and
+    decode/model inputs would exceed 8 s of frames.
+    """
+
+    def _write_long_clip(self, n=3000, step_ms=40.0):
+        return _write_clip([_frame(i * step_ms) for i in range(n)])
+
+    def test_late_window_text_survives_with_bounded_windows(self):
+        import numpy as np
+
+        clip = self._write_long_clip()
+        real_decode, real_align = inference.decode_records, inference.align_mouths
+        decode_spans, model_lens, factory_calls = [], [], []
+        try:
+            def fake_decode(records):
+                ts = [r["timestamp"] for r in records]
+                decode_spans.append(max(ts) - min(ts))
+                return (
+                    np.zeros((len(records), 120, 120), np.uint8),
+                    [np.asarray(_landmarks(), np.float32)] * len(records),
+                )
+
+            inference.decode_records = fake_decode
+            inference.align_mouths = lambda frames, lms: _moving_rois(len(frames))
+
+            def factory(beam, device):
+                factory_calls.append((beam, device))
+                calls = []
+
+                class M:
+                    def __call__(self, rois, fps):
+                        model_lens.append(len(rois))
+                        i = len(calls)
+                        calls.append(1)
+                        if i == 0:
+                            return "say still", 7
+                        if i == 1:
+                            return "type now", 7
+                        return f"filler{i}", 7
+
+                    device = "cpu"
+
+                return M()
+
+            result = inference.transcribe_clip(
+                clip,
+                model_factory=factory,
+                vocabulary=[
+                    {"id": "v", "word": "still type", "replacement": "Stilltype",
+                     "createdAt": "t"}
+                ],
+            )
+        finally:
+            inference.decode_records = real_decode
+            inference.align_mouths = real_align
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["frames"], 3000)
+        self.assertEqual(result["durationMs"], 119960)
+        self.assertEqual(result["inferenceMs"], 15 * 7)
+        self.assertEqual(len(factory_calls), 1)  # one model, reused across windows
+        self.assertEqual(len(decode_spans), 15)  # ceil(120 s / 8 s), no tail
+        for span in decode_spans:
+            self.assertLessEqual(span, 8000.0)
+        for length in model_lens:
+            self.assertLessEqual(length, 200)  # 8 s at 25 fps
+        self.assertIn("filler14", result["raw"])  # late text survives chunking
+        # Vocabulary applies once to the joined text, so a phrase split
+        # across the first window boundary is still replaced.
+        self.assertIn("Stilltype", result["text"])
+
+    def test_interim_stops_at_cross_chunk_pause(self):
+        import numpy as np
+
+        clip = self._write_long_clip()
+        real_decode, real_align = inference.decode_records, inference.align_mouths
+        for final, expected_decodes in ((False, 2), (True, 15)):
+            decode_calls, model_calls, align_calls = [], [], []
+            try:
+                def fake_decode(records):
+                    decode_calls.append(len(records))
+                    return (
+                        np.zeros((len(records), 120, 120), np.uint8),
+                        [np.asarray(_landmarks(), np.float32)] * len(records),
+                    )
+
+                def fake_align(frames, lms):
+                    align_calls.append(1)
+                    if len(align_calls) == 1:
+                        return _moving_rois(len(frames))
+                    return np.full((len(frames), 96, 96), 128, np.uint8)
+
+                inference.decode_records = fake_decode
+                inference.align_mouths = fake_align
+
+                def factory(beam, device):
+                    class M:
+                        def __call__(self, rois, fps):
+                            model_calls.append(len(rois))
+                            return "early words", 5
+
+                        device = "cpu"
+
+                    return M()
+
+                result = inference.transcribe_clip(clip, model_factory=factory, final=final)
+            finally:
+                inference.decode_records = real_decode
+                inference.align_mouths = real_align
+            self.assertIsNone(result["error"])
+            self.assertEqual(result["raw"], "early words")
+            self.assertEqual(result["text"], "Early words")
+            self.assertEqual(result["durationMs"], 119960)
+            self.assertEqual(result["frames"], 3000)
+            self.assertEqual(len(model_calls), 1)
+            # Interim stops after the pause runs through the second window;
+            # final scans every window for speech but finds it only in the first.
+            self.assertEqual(len(decode_calls), expected_decodes)
+
+
 if __name__ == "__main__":
     unittest.main()
