@@ -30,6 +30,21 @@ defines settings, history, vocabulary, the mobile model manifest
 window, blank 0, EOS 1048), and the `VisualRecognizer` interface. Recording
 sessions support **two minutes**, independently of the internal window size.
 
+### Camera sampling
+
+Android 0.2.1 fixes the camera frame-selection schedule. Requiring a fresh
+40 ms gap from the last accepted arrival discards every other frame from a
+regular 30 fps source, retaining only 15 fps. The replacement advances a 25 fps
+deadline without resetting its phase on each accepted image. It keeps five of
+every six regular 30 fps images, while retaining every image at 24 or 25 fps.
+A long stall reanchors the deadline; it never queues catch-up images.
+
+Four JVM regressions exercise 30/60 fps, unchanged 24/25 fps, early/duplicate
+arrivals and stalls. They test frame selection, not measured Pixel camera speed
+or recognition accuracy. Real analyzer throughput can still be lower when face
+detection is slow. The monotonic timestamp source, latest-image backpressure,
+resource cleanup, quiet veto and two-minute session bounds are unchanged.
+
 ## Model provenance
 
 The phone model is a CTC-only graph derived from the existing trained
