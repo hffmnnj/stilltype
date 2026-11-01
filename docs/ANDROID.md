@@ -344,6 +344,47 @@ model preparation and graph hashing are outside the stage timings. This is
 still an ungated research decoder, not a new app default or a physical Pixel
 GPU/NPU measurement.
 
+### Batched beam benchmark
+
+Export with `--decoder-mode beam`, then run `tools/benchmark_flare.py` to create
+the private numeric fixture. Transfer `encoder.onnx`, `cross.onnx` and
+`decoder-beam.onnx`, plus `face.f32`, `lip.f32` and `manifest.json`, to
+`files/experimental-flare-beam/` using the same `run-as` method. Run:
+
+```sh
+adb shell am instrument -w -r \
+  -e class 'com.stilltype.android.engine.ExperimentalFlareBeamBenchmarkTest#batchedGraphs_decodeRealFixtureOnCpu' \
+  com.stilltype.android.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The test validates graph hashes and exact input/output geometry, starts with
+zero-length self caches, expands from one row to five and reorders caches by
+selected parent. Native results are copied before their owners close. Complete
+tokens must match the independent reference; the status key
+`stilltypeExperimentalFlareBeam` contains timings but no tokens. The private
+`experimental-flare-beam/results.json` retains the numeric output.
+
+The coordinator built and ran this test on the API 36 x86_64 emulator, two
+virtual cores and 3 GiB guest RAM. All 29 generated tokens matched on a real
+129-frame input:
+
+| Stage | Time |
+| --- | ---: |
+| Encoder / cross / decoder session loads | 4,899 / 70 / 1,581 ms |
+| Encoder execution | 7,285 ms |
+| Cross projections | 53 ms |
+| Complete beam-5 loop, including validation/copies/search | 1,894 ms |
+| Native decoder calls within that loop | 911 ms |
+| Complete instrumentation test | 23.16 s |
+
+Sampled PSS after decoding was 1,254,360 KiB, not peak memory. A host CPU
+evaluation was running concurrently, so comparison with earlier greedy timings
+is not a controlled speed comparison. The stage timings exclude camera,
+preprocessing, model preparation and graph hashing. This proves native cached
+beam execution and token parity, **not** camera-to-text latency, physical Pixel
+acceleration or beam-50 accuracy. The application and delivered APK retain their
+existing model.
+
 ## Compute notes
 
 `AUTO` requests NNAPI with `CPU_DISABLED`, excluding NNAPI's reference CPU
