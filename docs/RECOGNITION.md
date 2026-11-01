@@ -756,12 +756,48 @@ so no new held-out run or camera-path change was made. This tests the unchanged
 model on those pixels, not the potential of retraining with higher-resolution
 crops or a physical-phone pipeline.
 
+#### Expanded training set
+
+Using the remaining eligible training data helped where deeper training on the
+same 500 examples had not. The expanded set contains **878 utterances**: all 500
+original samples, referenced in place, plus 378 newly prepared complete-frame
+samples from the same twenty training videos. All sixty original/fresh evaluation
+text hashes and both evaluation source-video hashes were excluded before the
+run; only stored hashes, not evaluation words, were used for that exclusion.
+There were no overlaps or preparation failures. The contract manifest SHA-256 is
+`4de46d8051c7bfdd078f8efad9b2e32383182a86104b7b2079ebcdf3b8077264`.
+This is more data for the same participant, not a new population of speakers.
+
+The fixed twenty-epoch run started from the first-stage personal model, with seed
+20261113 and the same visual/CNN/bridge/decoder groups and paired augmentations as
+the deeper experiment. The coordinator ran the full training and development
+generation, verified finite nonzero gradients in all four selected groups and
+unchanged frozen state, then independently reloaded the resulting model and
+reproduced a complete development prediction and score.
+
+Raw silent-development errors fell from **71/161 to 46/161 = 28.57% WER**. That
+is 35.21% fewer than the first personal model and 65.15% fewer than the current
+INT8 development baseline. It is not a second halving of the 71 remaining errors,
+and **development performance is not held-out confirmation**. No development
+sentence was exact. Ordinary-speech development gave 22/170 errors, still worse
+than the original Base model's 20/170. Neither result justifies changing the
+general application model or bypassing its quiet-input checks.
+
+The changed-state SHA-256 is
+`430d067869f645c111e3f398ac039b695459f565dbb84561c59076c64e971e87`;
+the frozen silent-development prediction SHA-256 is
+`27ad5c1203f339ecebc2a2ae1e67ec64d9233cfce99060f91351d8112a81581e`.
+The unchanged production Qwen3.5 4B Intent policy again completed all twelve raw
+development inputs without fallback but left errors at **46/161**. It failed the
+fixed at-most-39 eligibility rule and received no new held-out Intent run.
+
 #### Reproduce the personal training recipe
 
-`tools/adapt_flare.py` exposes the fixed first-stage recipe without evaluation
+`tools/adapt_flare.py` exposes the fixed recipes without evaluation
 inputs or downloads. It requires CUDA, the trusted FLARE source revision and
 Python 3.10 dependencies listed under [portable utilities](#portable-flare-research-utilities),
-plus rights to your paired training material. Supply exactly 500 unique items
+plus rights to your paired training material. The default `top4` recipe takes
+exactly 500 unique items
 in a private JSON manifest with `schemaVersion: 1`; each item has an opaque `id`,
 a `sample` path and its paired `text`. Relative paths resolve from the manifest.
 Each NPZ contains only equal `face` and `lip` uint8 arrays `[T,96,96]`, with
@@ -774,9 +810,32 @@ new limit on two-minute application recordings.
   --training-manifest /private/training/manifest.json \
   --output /private/new-personal-model --accept-license
 
+# Continue from that top4 output with all 878 paired examples.
+"$EXPORT_PY" tools/adapt_flare.py --recipe visual \
+  --checkpoint /path/flare-base-finetuned.pt --source /path/trusted-FLARE \
+  --initial-adaptation /private/new-personal-model \
+  --initial-training-manifest /private/training/manifest.json \
+  --training-manifest /private/expanded/manifest.json \
+  --output /private/new-visual-personal-model --accept-license
+
 TMPDIR=/path/private-scratch python -m unittest discover -s tools \
   -p test_flare_adaptation.py -v
 ```
+
+The `visual` recipe requires exactly 878 unique items and preserves every initial
+500 item by ID, canonical sample path and normalized text. Both initial arguments
+are required for `visual` and rejected for `top4`. It verifies the local top4
+artifact's fixed filenames, checkpoint/source/tokenizer identities, manifest and
+state hashes before applying tensor-only partial weights with `weights_only=True`.
+Metadata and prior-state reads have independent byte limits and are checked as
+the same immutable bytes that are loaded. The pinned original checkpoint is
+also loaded from its verified in-memory snapshot rather than reopening its path;
+this retains about 2.13 GB of checkpoint bytes during startup and needs more host
+RAM than the earlier memory-mapped loader.
+Tensor keys, shapes, dtypes and finiteness are checked before state application.
+This establishes consistency with the supplied prior artifact, not independent
+authenticity. The twenty-epoch visual recipe and its training-only crop/flip are
+fixed; it is not an arbitrary training configuration interface.
 
 The tool refuses private inputs, weights or outputs inside Git working trees,
 existing output paths, duplicate identities/texts and invalid arrays. It checks
@@ -787,8 +846,13 @@ changed weights and provenance/gradient/state metadata. Labels and pixels are
 not copied into metadata or progress logs. A failed run can leave private partial
 weights, but no completed metadata; cleanup of a temporary file after successful
 publication is nonfatal. The supplied source remains trusted executable code,
-not a sandbox. Nine focused boundary tests pass, including input replacement
-during header checking and oversized declared-array refusal.
+not a sandbox. Thirteen focused boundary tests pass, including input replacement
+during header checking, oversized artifacts and checkpoint replacement before
+and after snapshot verification. The coordinator also applied the actual prior
+artifact on CPU and checked both complete state identities and the real
+500-to-878 item inclusion. Full public `visual` training reproduction remains
+unverified until its complete run is recorded; the scores above identify the
+completed fixed research run.
 
 The coordinator also ran the public CLI through all ten epochs on the same 500
 private examples, preserving their original order in the new manifest schema.
