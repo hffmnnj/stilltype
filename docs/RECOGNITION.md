@@ -217,8 +217,10 @@ is pipeline evidence, not accurate dictation or physical-phone verification.
 
 ## Broader 2026 model experiments
 
-These are research measurements, **not a new app engine or a 90%-accuracy
-claim**. [FLARE](https://github.com/jxzhanggg/FLARE) combines full-face and lip
+These are research measurements, **not a 90%-accuracy claim**. Android now offers
+a separately consented Quality path based on the Base Transformer; the adapted
+7B visual-language experiment below is not that APK engine or a new default.
+[FLARE](https://github.com/jxzhanggg/FLARE) combines full-face and lip
 inputs with a Transformer decoder. Its [2026 paper, Table 2](https://arxiv.org/html/2610.19559v1)
 distinguishes the Base and Large encoders from the separate 7B LLM variant.
 The paper's best 13.2% LRS3 WER belongs to Large plus the LLM, not the Base
@@ -397,6 +399,138 @@ development-only 9.41% WER nor intent-assisted guesses establish general 90%
 accuracy. The Large visual checkpoint gave 19/170 development errors, just one
 fewer than Base; it failed the same 17-error eligibility rule and was not run
 on these test or confirmation clips.
+
+### Learned visual-language adaptation
+
+A separate experiment uses the released **2026 FLARE-LLM stage-3 adaptation**,
+not post-hoc text correction. The visual encoder's features pass through the
+trained projection and directly condition the language model. No reference,
+audio, caption, vocabulary list or conversation context is provided.
+
+The pinned adapter is `lipreading_exp_4_base_face_lip_s2/checkpoints/checkpoint_4_60000.pt`
+from the same release revision above: 615,953,103 bytes, SHA-256
+`d36cf01efd81090ddf0ad814e966bb50a5b42d141c715beb83462f625d2fd3c4`.
+It contains 394 LoRA tensors, including the output-head pair, and six projection
+tensors. Export and GGUF conversion preserved every tensor bit-for-bit in FP32.
+The projection is 512→2048→3584, with GELU and LayerNorm; rank is 16, alpha 32.
+
+This is an **approximate reproduction**, not the paper's LLM result:
+
+- The underlying non-Instruct **Qwen2.5-7B base is older**, not a 2026 release.
+  The experiment uses [mradermacher's Q4_K_M packaging](https://huggingface.co/mradermacher/Qwen2.5-7B-GGUF)
+  at revision `70758bc7e4ea7671578fdcb3fbc62e6d2870e66c`, file
+  `Qwen2.5-7B.Q4_K_M.gguf`, 4,683,073,984 bytes, SHA-256
+  `c1c8899139b014b35d0b205e99319a8de73cf122c615b5cb0d2cd28c8a97b4d2`.
+  The original training base revision is undocumented.
+- The saved adapter config and published launch scripts point to the internal
+  `exp_22_base/finetuned/v/face_lip_4966h_cfg1/checkpoints/checkpoint_last.pt`.
+  The released Base checkpoint is a plausible intended match, but no published
+  hash maps that internal file to the released bytes. Its encoder is used as an
+  explicitly approximate substitute; compatible shapes do not prove identity.
+- The visual encoder and projection run in FP32, followed by the source's BF16
+  rounding of projected vectors. Quantized token embeddings differ from the
+  source's BF16 concatenation. Greedy decoding differs from the published
+  shrinking beam-30 search at temperature 1.2.
+
+The generic input is token `A`, projected visual frames, `transcribe the video: `,
+then the source EOS start token. Native `llama.cpp` consumes embedding batches
+directly, with four CPU threads, zero GPU-layer offload, a 512-token context and
+a 128-generated-token cap. A missing natural EOS is a scored failure, not forced
+termination or a discarded clip. This is local inference, not an HTTP service.
+
+Development gave 15/170 errors, meeting the previously fixed eligibility rule
+of at most 17. The **unchanged** configuration then decoded every locked test
+and confirmation input. All 40 clips reached natural EOS without a cap or model
+error. Scoring retained the existing normalization and word-edit denominator:
+
+| Host visual-only system | Development, 170 words | Test, 204 words | Confirmation, 258 words |
+| --- | ---: | ---: | ---: |
+| Current INT8, phone-like per-frame crops | 47/170 = 27.65% | 91/204 = 44.61% | 86/258 = 33.33% |
+| FLARE Base, centered crops, beam 50 | 20/170 = 11.76% | 47/204 = 23.04% | 40/258 = 15.50% |
+| Adapted visual LLM, centered crops, greedy | 15/170 = 8.82% | 24/204 = 11.76% | 25/258 = 9.69% |
+
+Relative to the phone-like host path, test errors fell **73.63%** and confirmation
+errors **70.93%**. Against Base beam 50, the reductions were 48.94% and 37.50%.
+Neither proves two successive halvings, the original GRID goal, phone accuracy,
+unseen training material or natural silent-mouthing performance. The provisional
+captions and same-source confirmation limits above remain; a separate audio-only
+caption audit already found disagreement, not human-verified ground truth.
+
+Predictions were frozen before scoring: development SHA-256
+`501e95d9996dd74b244e6582def07be6de9a203cee1c11fb66ac36be6d66d127`,
+combined 28 held-out rows
+`44cb05eaf21fba5a359702836c9f16e7465cd5ea05ea140f537bb97d13ced89a`.
+The coordinator independently ran the first complete native round trip and
+matched its raw text and natural EOS exactly. Held-out prefill/decoding took
+4.67–11.58 seconds per clip on the host CPU, excluding visual preparation,
+projection and model loading—not camera-to-text or phone timings.
+
+Four cyclically swapped visual inputs reproduced the corresponding **source
+visual prediction**, not the original clip's prediction. This supports visual
+conditioning, not absence of training overlap. Four all-zero embedding controls
+all emitted nonempty text. These are ablations, **not natural quiet clips**;
+they reinforce the need for an independent activity veto. No ungated model
+switch, Android 7B integration or change to the optional text-Intent policy is
+made from these results. The adaptation remains CC-BY-NC-4.0.
+
+Transfer back to the **original GRID set was negative**. The same unchanged
+candidate scored 97/120 development errors, 87/120 test errors and 177/240 on
+the disjoint confirmation set, versus the earlier ungated Base model's 88/120,
+83/120 and 171/240. One original-speech input hit the output cap and remains
+scored as a failure. All 27 natural quiet controls emitted nonempty text. The
+107-row frozen raw file has SHA-256
+`0ed505a4f567f4fbd91c863e423156ab2128ac6a1a69be205705b785c82b78d1`;
+gate8 flags were retained separately and not applied to those raw scores.
+This is earlier approximate GRID preprocessing, not native-camera parity.
+**The original halving target remains unmet.** Strong natural-speech results
+do not justify hiding this out-of-domain regression.
+
+`tools/prepare_flare_llm.py` makes the adapter/projection preparation
+reproducible without importing fairseq or executing classes from its pickle.
+Use an isolated Python 3.12 environment with Torch 2.7.1, NumPy, ONNX Runtime
+1.24.3 and safetensors 0.8.0. The commands perform no downloads. Supply the pinned
+stage-3 checkpoint and trusted encoder export described above:
+
+```sh
+python tools/prepare_flare_llm.py export \
+  --checkpoint /path/checkpoint_4_60000.pt \
+  --output /path/new-llm-preparation --accept-license
+
+# Use the trusted upstream converter at llama.cpp revision
+# d81235049384534c167caea52b85a694f6103d14, with local official base config/tokenizer.
+python /path/trusted-llama.cpp/convert_lora_to_gguf.py \
+  /path/new-llm-preparation/peft --base /path/Qwen2.5-7B-config \
+  --outtype f32 --outfile /path/new-flare-adapter.gguf
+
+python tools/prepare_flare_llm.py project \
+  --model-dir /path/flare-fp32-export \
+  --projection /path/new-llm-preparation/projection.safetensors \
+  --sample /path/visual-only.npz --output /path/new-projected-input \
+  --accept-license
+```
+
+Only the fixed checkpoint's exact size/hash is accepted, before Torch import
+or output creation. Deserialization uses `weights_only=True`, `mmap=True` and
+three inert stand-ins. Every expected layer, output-head pair, shape, FP32 dtype
+and finite value is checked. Safetensor outputs are reloaded and compared
+bit-for-bit; metadata records their hashes. Keep the verified source files
+stable during execution: concurrent input modification is not locked out.
+
+The projection stage verifies the encoder descriptors and pinned projection,
+accepts only a reference-free `face`/`lip` uint8 NPZ, and writes private normalized
+visual data—not a transcript. `visual.bin` is little-endian uint32 `[T,3584]`
+followed by float32 `[T,3584]`, with T in 1–200. These face-derived features are
+sensitive. New directories must be outside every Git checkout; existing output
+paths are refused rather than overwritten or cleaned.
+
+The coordinator ran the public export and projection: all 400 exported tensors
+matched the frozen artifacts, and the 129-frame binary matched the earlier
+native-tested input **byte-for-byte**. Four focused refusal/schema/help tests
+also passed. These are reproducibility checks, not additional accuracy data:
+
+```sh
+python -m unittest discover -s tools -p 'test_flare_llm.py' -v
+```
 
 ### Rejected sampling change
 
