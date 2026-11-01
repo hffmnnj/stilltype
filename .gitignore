@@ -15,6 +15,7 @@ engine/models/
 !.env.example
 runtime/
 *.tsbuildinfo
+!package-lock.json
 public/vision/ort/
 public/vision/face_detection_yunet_2026may.onnx
 public/vision/*.part
