@@ -403,6 +403,45 @@ controlled speed comparison or camera-to-text latency. Sampled process PSS was
 was stopped after the check. Physical Pixel and camera-path compatibility remain
 unverified, and the delivered APK still uses the existing model.
 
+### Full beam with bounded native batches
+
+Export with `--decoder-mode beam --beam-size 50`, optionally pack the graphs,
+and generate a new numeric fixture. The same instrumentation test accepts beam
+widths 5 and 50. It evaluates all active hypotheses in chunks of at most five
+rows, then ranks candidates globally. This preserves full beam-50 search; it is
+not ten independent five-beam searches.
+
+On the same API 36 x86_64 emulator, the coordinator verified all 19 independent
+Torch tokens on a 136-frame fixture. Its beam-50 output differs from beam 5,
+so the fixture exercises a real search-width distinction. All 231 decoder calls
+were bounded to five rows. A subsequent beam-5 regression also matched all 29
+expected tokens on the earlier 129-frame input.
+
+Component profiling exposed ranking overhead. A bounded worst-first heap keeps
+the existing score and flat-index tie ordering while avoiding a linear scan for
+every vocabulary entry. Three focused native tests cover both widths, global
+ties, masked tokens and negative-infinity candidates. All passed, alongside the
+real beam-50 fixture. Separate runs on the same fixture measured:
+
+| Beam-50 component | Sorted candidate list | Bounded heap |
+| --- | ---: | ---: |
+| Native decoder calls | 6,736 ms | 6,815 ms |
+| Candidate selection | 2,897 ms | 250 ms |
+| Output copying and finite checks | 4,467 ms | 4,413 ms |
+| Complete decoder loop | 15,039 ms | 12,458 ms |
+
+The heap run's encoder took 4,367 ms; the complete instrumentation test took
+21.17 seconds. Sampled process PSS after decoding was 1,421,460 KiB, not peak
+memory. Timings exclude camera, preprocessing, model preparation and hashing;
+these are emulator CPU measurements, not physical Pixel or end-to-end latency.
+
+Java-heap pressure remains a limitation. An attempted reusable direct-buffer
+pinned-output optimization exceeded this emulator's 192 MiB Java heap and was
+removed. The successful short fixtures do not prove all 128-prefix outputs fit.
+Moving cache handling into native graph operations is the next experiment;
+neither raising heap limits nor dropping finite checks is a shipped fix.
+The application and delivered APK still use the existing recognition engine.
+
 ## Compute notes
 
 `AUTO` requests NNAPI with `CPU_DISABLED`, excluding NNAPI's reference CPU
