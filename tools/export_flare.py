@@ -24,7 +24,8 @@ CHECKPOINT_SIZE = 2_126_211_579
 CHECKPOINT_SHA256 = "fe8c8ecab633bd4e3e490924e2bc917420b4d18d7309a5cd612902ccc842853b"
 CHECKPOINT_REVISION = "6187ad650dc1786a8efc8b6bfbee37bbf62c4b2e"
 CHECKPOINT_ARTIFACT = "exp_22_base/finetuned/checkpoints/checkpoint_last.pt"
-GRAPH_NAMES = ("encoder.onnx", "decoder.onnx")
+GRAPH_NAMES = ("encoder.onnx", "decoder.onnx", "cross.onnx", "decoder-cache.onnx")
+CACHE_LAYERS, CACHE_HEADS, CACHE_HEAD_DIM = 6, 4, 192
 
 
 def sha256(path: Path) -> str:
@@ -74,7 +75,10 @@ def load_sample(path: Path) -> tuple[Any, Any]:
         return normalize(face), normalize(lip)
 
 
-def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, device: str) -> dict[str, Any]:
+def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, device: str,
+           decoder_mode: str = "full") -> dict[str, Any]:
+    if decoder_mode not in ("full", "cached"):
+        raise ValueError("decoder mode must be full or cached")
     output = validate_output(output)
     if not (source / "flare" / "__init__.py").is_file():
         raise ValueError("source must be a trusted FLARE checkout containing flare/__init__.py")
@@ -170,12 +174,59 @@ def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, devi
             logits, _ = self.decoder(tokens, {"encoder_out": encoder_out, "padding_mask": padding_mask})
             return logits[:, -1, :]
 
+    class CrossProject(torch.nn.Module):
+        def __init__(self, layers: Any) -> None:
+            super().__init__()
+            self.layers = layers
+
+        def forward(self, encoded: Any) -> tuple[Any, ...]:
+            result = []
+            for layer in self.layers:
+                attn = layer.encoder_attn
+                for projection in (attn.k_proj, attn.v_proj):
+                    value = projection(encoded).view(-1, attn.num_heads, attn.head_dim)
+                    result.append(value.permute(1, 0, 2).unsqueeze(0))
+            return tuple(result)
+
+    class IncrementalDecoder(torch.nn.Module):
+        def __init__(self, decoder: Any) -> None:
+            super().__init__()
+            self.decoder = decoder
+
+        def forward(self, tokens: Any, encoded: Any, mask: Any, *cache: Any) -> tuple[Any, ...]:
+            state: dict[str, Any] = {}
+            count = len(self.decoder.layers)
+            for index, layer in enumerate(self.decoder.layers):
+                layer.self_attn._set_input_buffer(state, {
+                    "prev_key": cache[2 * index], "prev_value": cache[2 * index + 1],
+                })
+                layer.encoder_attn._set_input_buffer(state, {
+                    "prev_key": cache[2 * count + 2 * index],
+                    "prev_value": cache[2 * count + 2 * index + 1],
+                    "prev_key_padding_mask": mask,
+                })
+            logits, _ = self.decoder(tokens, {"encoder_out": encoded, "padding_mask": mask},
+                                     incremental_state=state)
+            result = [logits[:, -1, :]]
+            for layer in self.decoder.layers:
+                saved = layer.self_attn._get_input_buffer(state)
+                result.extend((saved["prev_key"], saved["prev_value"]))
+            return tuple(result)
+
     dictionary = task.target_dictionary
     symbols = list(dictionary.symbols)
     if len(symbols) != 1000:
         raise ValueError(f"expected 1000 dictionary symbols, got {len(symbols)}")
     encoder = VisualEncoder(model.encoder).eval()
     decoder = Decoder(model.decoder).eval()
+    if decoder_mode == "cached":
+        if type(model.decoder.embed_positions).__name__ != "SinusoidalPositionalEmbedding":
+            raise ValueError("expected the inspected sinusoidal positional embedding")
+        if len(model.decoder.layers) != CACHE_LAYERS or any(
+            attn.num_heads != CACHE_HEADS or attn.head_dim != CACHE_HEAD_DIM
+            for layer in model.decoder.layers for attn in (layer.self_attn, layer.encoder_attn)
+        ):
+            raise ValueError("unsupported decoder cache geometry")
     face = torch.from_numpy(face_array).unsqueeze(0).unsqueeze(0).to(device)
     lip = torch.from_numpy(lip_array).unsqueeze(0).unsqueeze(0).to(device)
     mask = torch.ones(1, dtype=torch.bool, device=device)
@@ -184,7 +235,9 @@ def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, devi
 
     output.mkdir(parents=True, exist_ok=True)
     # Reserve all names exclusively before export; existing artifacts are never overwritten.
-    for name in (*GRAPH_NAMES, "metadata.json"):
+    graph_names = ("encoder.onnx", "decoder.onnx") if decoder_mode == "full" else (
+        "encoder.onnx", "cross.onnx", "decoder-cache.onnx")
+    for name in (*graph_names, "metadata.json"):
         with (output / name).open("xb"):
             pass
     with torch.inference_mode():
@@ -198,17 +251,46 @@ def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, devi
         )
         encoded, encoded_mask = encoder(*inputs)
         prefix = torch.tensor([[dictionary.eos(), 4, 5]], dtype=torch.long, device=device)
-        model.decoder._future_mask = None
-        torch.onnx.export(
-            decoder, (prefix, encoded, encoded_mask), str(output / GRAPH_NAMES[1]),
-            input_names=["tokens", "encoder_out", "encoder_padding_mask"], output_names=["next_logits"],
-            dynamic_axes={"tokens": {1: "prefix"}, "encoder_out": {0: "encoded_frames"},
-                          "encoder_padding_mask": {1: "encoded_frames"}},
-            opset_version=17, dynamo=False,
-        )
+        if decoder_mode == "full":
+            model.decoder._future_mask = None
+            torch.onnx.export(
+                decoder, (prefix, encoded, encoded_mask), str(output / "decoder.onnx"),
+                input_names=["tokens", "encoder_out", "encoder_padding_mask"], output_names=["next_logits"],
+                dynamic_axes={"tokens": {1: "prefix"}, "encoder_out": {0: "encoded_frames"},
+                              "encoder_padding_mask": {1: "encoded_frames"}},
+                opset_version=17, dynamo=False,
+            )
+        else:
+            cross_names = [f"cross_{i}_{kind}" for i in range(CACHE_LAYERS) for kind in ("key", "value")]
+            past_names = [f"past_{i}_{kind}" for i in range(CACHE_LAYERS) for kind in ("key", "value")]
+            present_names = [f"present_{i}_{kind}" for i in range(CACHE_LAYERS) for kind in ("key", "value")]
+            cross = CrossProject(model.decoder.layers).eval()
+            cached = IncrementalDecoder(model.decoder).eval()
+            torch.onnx.export(
+                cross, (encoded,), str(output / "cross.onnx"), input_names=["encoder_out"],
+                output_names=cross_names,
+                dynamic_axes={"encoder_out": {0: "encoded_frames"},
+                              **{name: {2: "encoded_frames"} for name in cross_names}},
+                opset_version=17, dynamo=False,
+            )
+            cross_values = cross(encoded)
+            past = tuple(torch.zeros((1, CACHE_HEADS, 2, CACHE_HEAD_DIM), device=device,
+                                     dtype=encoded.dtype) for _ in past_names)
+            torch.onnx.export(
+                cached, (prefix, encoded, encoded_mask, *past, *cross_values),
+                str(output / "decoder-cache.onnx"),
+                input_names=["tokens", "encoder_out", "encoder_padding_mask", *past_names, *cross_names],
+                output_names=["next_logits", *present_names],
+                dynamic_axes={"tokens": {1: "prefix"}, "encoder_out": {0: "encoded_frames"},
+                              "encoder_padding_mask": {1: "encoded_frames"},
+                              **{name: {2: "past"} for name in past_names},
+                              **{name: {2: "encoded_frames"} for name in cross_names},
+                              **{name: {2: "present"} for name in present_names}},
+                opset_version=17, dynamo=False,
+            )
 
     files = [{"name": name, "sizeBytes": (output / name).stat().st_size, "sha256": sha256(output / name)}
-             for name in GRAPH_NAMES]
+             for name in graph_names]
     metadata = {
         "schemaVersion": 1, "modelId": "flare-base-transformer-2026-research", "releaseYear": 2026,
         "license": "CC-BY-NC-4.0", "sourceCheckpointRepository": "Anony94/FLARE-checkpoints",
@@ -221,10 +303,16 @@ def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, devi
         "bosId": dictionary.bos(), "padId": dictionary.pad(), "eosId": dictionary.eos(),
         "unkId": dictionary.unk(), "symbols": symbols, "files": files,
         "encoderBytes": files[0]["sizeBytes"], "encoderSha256": files[0]["sha256"],
-        "decoderBytes": files[1]["sizeBytes"], "decoderSha256": files[1]["sha256"],
         "note": "Caller must enforce frame and prefix bounds. Padding and exact bounds are not yet validated app features. "
                 "These are exported utilities, not new trained weights or evidence of accuracy gains or native readiness.",
     }
+    if decoder_mode == "full":
+        metadata.update(decoderBytes=files[1]["sizeBytes"], decoderSha256=files[1]["sha256"])
+    else:
+        metadata.update(decoderMode="cached", cacheLayers=CACHE_LAYERS, cacheHeads=CACHE_HEADS,
+                        cacheHeadDim=CACHE_HEAD_DIM, crossBytes=files[1]["sizeBytes"],
+                        crossSha256=files[1]["sha256"], cachedDecoderBytes=files[2]["sizeBytes"],
+                        cachedDecoderSha256=files[2]["sha256"])
     (output / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"output": str(output), "device": device, "files": files, "metadata": "metadata.json"}
 
@@ -236,11 +324,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sample", type=Path, required=True, help="Reference-free NPZ with face and lip uint8 [T,96,96].")
     parser.add_argument("--output", type=Path, required=True, help="Output directory outside the repository.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--decoder-mode", choices=("full", "cached"), default="full")
     parser.add_argument("--accept-license", action="store_true", required=True, help="Accept CC-BY-NC-4.0 model terms.")
     args = parser.parse_args(argv)
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            result = export(args.checkpoint, args.source, args.sample, args.output, args.device)
+            result = export(args.checkpoint, args.source, args.sample, args.output, args.device, args.decoder_mode)
     except (ValueError, RuntimeError, OSError, ImportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from export_flare import validate_output
+from export_flare import CACHE_HEAD_DIM, CACHE_HEADS, CACHE_LAYERS, validate_output
 
 if TYPE_CHECKING:
     import numpy as np
@@ -23,9 +23,9 @@ if TYPE_CHECKING:
 MODEL_ID = "flare-base-transformer-2026-research"
 
 
-def checked_graph(directory: Path, kind: str, metadata: dict) -> Path:
+def checked_graph(directory: Path, kind: str, metadata: dict, filename: str | None = None) -> Path:
     """Check export consistency, not authenticity: the directory must be trusted."""
-    path = directory / f"{kind}.onnx"
+    path = directory / (filename or f"{kind}.onnx")
     if path.stat().st_size != metadata[f"{kind}Bytes"]:
         raise ValueError(f"{kind} graph size does not match metadata")
     with path.open("rb") as stream:
@@ -33,6 +33,46 @@ def checked_graph(directory: Path, kind: str, metadata: dict) -> Path:
     if digest != metadata[f"{kind}Sha256"]:
         raise ValueError(f"{kind} graph SHA-256 does not match metadata")
     return path
+
+
+def cached_greedy_decode(
+    session: ort.InferenceSession, encoded: np.ndarray, mask: np.ndarray,
+    cross_values: dict[str, np.ndarray],
+) -> list[int]:
+    import numpy as np
+
+    names = [(i, kind) for i in range(CACHE_LAYERS) for kind in ("key", "value")]
+    past_names = [f"past_{i}_{kind}" for i, kind in names]
+    present_names = [f"present_{i}_{kind}" for i, kind in names]
+    input_names = {node.name for node in session.get_inputs()}
+    required = {"tokens", "encoder_padding_mask", *past_names, *cross_values}
+    if not required <= input_names or input_names - (required | {"encoder_out"}):
+        raise ValueError("Unsupported cached decoder inputs")
+    cache = {name: np.zeros((1, CACHE_HEADS, 0, CACHE_HEAD_DIM), dtype=np.float32)
+             for name in past_names}
+    tokens = [2]
+    for step in range(128):
+        candidates = {"tokens": np.asarray([tokens], dtype=np.int64), "encoder_out": encoded,
+                      "encoder_padding_mask": mask, **cache, **cross_values}
+        values = session.run(["next_logits", *present_names],
+                             {key: value for key, value in candidates.items() if key in input_names})
+        if len(values) != 1 + len(past_names):
+            raise ValueError("Invalid cached decoder output count")
+        logits = values[0]
+        if logits.shape != (1, 1000) or not np.isfinite(logits).all():
+            raise ValueError("Invalid or non-finite decoder output")
+        expected_shape = (1, CACHE_HEADS, len(tokens), CACHE_HEAD_DIM)
+        if any(value.shape != expected_shape or not np.isfinite(value).all() for value in values[1:]):
+            raise ValueError("Invalid or non-finite self cache output")
+        cache = dict(zip(past_names, values[1:]))
+        logits[0, 1] = -np.inf
+        if step == 0:
+            logits[0, 2] = -np.inf
+        token = int(logits[0].argmax())
+        tokens.append(token)
+        if token == 2:
+            return tokens
+    raise ValueError("Decoder did not generate EOS within 128 iterations")
 
 
 def greedy_decode(
@@ -75,7 +115,26 @@ def run(model_dir: Path, sample: Path, output: Path) -> dict:
     }
     if any(metadata.get(key) != value for key, value in required.items()):
         raise ValueError("Unsupported FLARE export metadata")
-    graphs = {kind: checked_graph(model_dir, kind, metadata) for kind in ("encoder", "decoder")}
+    mode = metadata.get("decoderMode", "full")
+    if mode not in ("full", "cached"):
+        raise ValueError("Unsupported FLARE decoder mode")
+    if mode == "cached" and any(metadata.get(key) != value for key, value in {
+        "cacheLayers": CACHE_LAYERS, "cacheHeads": CACHE_HEADS, "cacheHeadDim": CACHE_HEAD_DIM,
+    }.items()):
+        raise ValueError("Unsupported FLARE cache geometry")
+    graph_specs = [("encoder", "encoder.onnx", "encoder")]
+    graph_specs += ([("decoder", "decoder.onnx", "decoder")] if mode == "full" else [
+        ("cross", "cross.onnx", "cross"), ("cachedDecoder", "decoder-cache.onnx", "cachedDecoder")])
+    entries = metadata.get("files")
+    if not isinstance(entries, list) or len(entries) != len(graph_specs):
+        raise ValueError("Invalid graph file list")
+    for _, filename, key in graph_specs:
+        matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("name") == filename]
+        if (len(matches) != 1 or matches[0].get("sizeBytes") != metadata.get(f"{key}Bytes")
+                or matches[0].get("sha256") != metadata.get(f"{key}Sha256")):
+            raise ValueError("Graph file list does not match metadata")
+    graphs = {name: checked_graph(model_dir, key, metadata, filename)
+              for name, filename, key in graph_specs}
     with np.load(sample, allow_pickle=False) as data:
         if set(data.files) != {"face", "lip"}:
             raise ValueError("Sample must contain only face and lip arrays")
@@ -105,15 +164,28 @@ def run(model_dir: Path, sample: Path, output: Path) -> dict:
     if (encoded.shape != (frames, 1, 512) or mask.shape != (1, frames)
             or not np.isfinite(encoded).all()):
         raise ValueError("Invalid or non-finite encoder output")
-    started = time.perf_counter()
-    tokens = greedy_decode(sessions["decoder"], encoded, mask)
-    decoder_ms = (time.perf_counter() - started) * 1000
     summary = {
         "modelId": MODEL_ID, "provider": "CPUExecutionProvider", "frames": frames,
-        "generatedTokenCount": len(tokens) - 1, "loadMs": load_ms,
-        "encoderMs": encoder_ms, "fullPrefixDecoderMs": decoder_ms,
+        "loadMs": load_ms, "encoderMs": encoder_ms,
         "excludes": "camera, preprocessing, graph hashing; not a phone benchmark",
     }
+    if mode == "full":
+        started = time.perf_counter()
+        tokens = greedy_decode(sessions["decoder"], encoded, mask)
+        summary["fullPrefixDecoderMs"] = (time.perf_counter() - started) * 1000
+    else:
+        cross_names = [f"cross_{i}_{kind}" for i in range(CACHE_LAYERS) for kind in ("key", "value")]
+        started = time.perf_counter()
+        values = sessions["cross"].run(cross_names, {"encoder_out": encoded})
+        summary["crossMs"] = (time.perf_counter() - started) * 1000
+        expected_shape = (1, CACHE_HEADS, frames, CACHE_HEAD_DIM)
+        if (len(values) != len(cross_names) or any(
+                value.shape != expected_shape or not np.isfinite(value).all() for value in values)):
+            raise ValueError("Invalid or non-finite cross cache output")
+        started = time.perf_counter()
+        tokens = cached_greedy_decode(sessions["cachedDecoder"], encoded, mask, dict(zip(cross_names, values)))
+        summary["cachedDecoderMs"] = (time.perf_counter() - started) * 1000
+    summary["generatedTokenCount"] = len(tokens) - 1
     write_fixture(output, face, lip, metadata, tokens, summary)
     return summary
 
