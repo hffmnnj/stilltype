@@ -1,0 +1,21 @@
+FLARE Quality model attribution
+
+The optional Quality pack uses the FLARE contributors' model checkpoints
+for the 2026 paper "Learning Visual Speech Representations via Cross-Modal
+Distillation and Joint Face-Lip Modeling". The checkpoint release does not
+identify its authors by name.
+
+Source: https://huggingface.co/Anony94/FLARE-checkpoints
+Revision: 6187ad650dc1786a8efc8b6bfbee37bbf62c4b2e
+Checkpoint: exp_22_base/finetuned/checkpoints/checkpoint_last.pt
+SHA-256: fe8c8ecab633bd4e3e490924e2bc917420b4d18d7309a5cd612902ccc842853b
+
+The Quality pack is modified from the checkpoint: model graphs have been
+exported to ONNX, with compact storage and separate beam decoder and cache
+helper graphs. These exports are not newly trained model weights.
+
+The source is offered under Creative Commons Attribution-NonCommercial 4.0
+International (CC BY-NC 4.0); commercial use is not licensed under those
+terms. The full license is provided in FLARE-CC-BY-NC-4.0.txt and at
+https://creativecommons.org/licenses/by-nc/4.0/legalcode.txt. The licensed
+material is provided without warranties; see the license for details.

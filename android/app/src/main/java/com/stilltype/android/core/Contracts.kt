@@ -17,6 +17,9 @@ enum class AppTheme { SYSTEM, LIGHT, DARK }
 enum class ComputeMode { AUTO, CPU }
 
 @Serializable
+enum class RecognitionMode { FAST, QUALITY }
+
+@Serializable
 data class AppSettings(
     val theme: AppTheme = AppTheme.SYSTEM,
     val mirrored: Boolean = true,
@@ -25,6 +28,7 @@ data class AppSettings(
     val retentionDays: Int = 30,
     val maxClipSeconds: Int = MAX_SESSION_SECONDS,
     val computeMode: ComputeMode = ComputeMode.AUTO,
+    val recognitionMode: RecognitionMode = RecognitionMode.FAST,
 )
 
 @Serializable
@@ -97,6 +101,7 @@ data class ModelStatus(
     val modelId: String = "usr2-baseplus-2026-ctc-int8",
     val message: String = "Checking model",
     val error: String? = null,
+    val unavailableReason: String? = null,
 )
 
 data class InstalledModels(val directory: File, val manifest: MobileModelManifest)
@@ -132,6 +137,13 @@ interface VisualRecognizer : AutoCloseable {
     /** Called serially off the UI thread. The caller owns and recycles the bitmap. */
     fun analyze(bitmap: Bitmap, timestampMs: Long): FrameAnalysis
     suspend fun recognize(frames: List<MouthFrame>, compute: ComputeMode): RecognitionResult
+    fun analyzeForQuality(bitmap: Bitmap, timestampMs: Long): FrameAnalysis = analyze(bitmap, timestampMs)
+    fun createQualityAccumulator(): QualityFrameAccumulator? = null
+    suspend fun recognizeQuality(
+        frames: List<MouthFrame>,
+        compute: ComputeMode,
+        onProgress: (RecognitionProgress) -> Unit = {},
+    ): RecognitionResult = RecognitionResult("", "", 0, 0, frames.size, "", "quality-models-missing")
 }
 
 const val ACTION_CAPTURE = "com.stilltype.android.CAPTURE"

@@ -51,6 +51,33 @@ val stageBundledModels = tasks.register<Copy>("stageBundledModels") {
     into(stagedRecognitionDir)
 }
 
+val qualityModelDir = providers.gradleProperty("qualityModelDir")
+    .orElse(providers.environmentVariable("STILLTYPE_QUALITY_MODEL_DIR"))
+    .orElse("")
+    .get()
+val qualityFiles = listOf(
+    "metadata.json", "cache.json", "encoder.onnx", "cross.onnx", "decoder-beam.onnx",
+    "cache-gather.onnx", "cache-merge.onnx",
+)
+val stagedQualityAssetsRoot = if (qualityModelDir.isNotBlank()) {
+    layout.buildDirectory.dir("generated/qualityModelAssets")
+} else {
+    layout.buildDirectory.dir("generated/qualityModelAssetsEmpty")
+}
+val stageQualityModels = tasks.register<Sync>("stageQualityModels") {
+    onlyIf { qualityModelDir.isNotBlank() }
+    doFirst {
+        val source = file(qualityModelDir)
+        if (!source.isDirectory || qualityFiles.any { !source.resolve(it).isFile }) {
+            throw org.gradle.api.GradleException(
+                "qualityModelDir must contain all seven Quality pack files: $qualityFiles",
+            )
+        }
+    }
+    from(qualityModelDir) { include(qualityFiles) }
+    into(layout.buildDirectory.dir("generated/qualityModelAssets/quality"))
+}
+
 android {
     namespace = "com.stilltype.android"
     compileSdk = 36
@@ -59,8 +86,8 @@ android {
         applicationId = "com.stilltype.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -96,6 +123,7 @@ android {
     sourceSets {
         named("main") {
             assets.srcDir(stagedAssetsRoot)
+            assets.srcDir(stagedQualityAssetsRoot)
         }
     }
 }
@@ -108,6 +136,7 @@ kotlin {
 
 tasks.named("preBuild") {
     dependsOn(stageBundledModels)
+    dependsOn(stageQualityModels)
 }
 
 dependencies {
