@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/brand/stilltype-cover-generated.png" alt="Original generated Stilltype brand artwork" width="1000" />
+  <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/public/brand/stilltype-cover-generated.png" alt="Original generated Stilltype brand artwork" width="1000" />
 </p>
 
 <h1 align="center">Stilltype</h1>
@@ -17,8 +17,8 @@
 ---
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/desktop-dark.png" />
-  <img src="docs/screenshots/desktop-light.png" alt="Stilltype Dictate page with camera stage, readiness status and transcript" />
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/desktop-dark.png" />
+  <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/desktop-light.png" alt="Stilltype Dictate page with camera stage, readiness status and transcript" />
 </picture>
 
 <p align="center"><sub>Dictate on desktop, light and dark. Screenshots show the real app UI — not a model accuracy claim.</sub></p>
@@ -26,11 +26,11 @@
 Stilltype reads silently mouthed words from your camera and turns them into editable text. No microphone, no accounts, no hosted inference, no telemetry. The desktop app pairs a Tauri&nbsp;2 / Rust / React shell with a private Python stdio visual-inference worker and compiled-in text cleanup; the Android companion is native Kotlin&nbsp;/ Compose&nbsp;Material&nbsp;3 with ONNX&nbsp;Runtime and OpenCV — no Python on the phone.
 
 <p align="center">
-  <img src="docs/screenshots/android-dictate.png" alt="Stilltype Android Dictate screen" width="230" />
+  <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/android-dictate.png" alt="Stilltype Android Dictate screen" width="230" />
   &ensp;
-  <img src="docs/screenshots/android-capture.png" alt="Stilltype Android compact capture activity" width="230" />
+  <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/android-capture.png" alt="Stilltype Android compact capture activity" width="230" />
   &ensp;
-  <img src="docs/screenshots/android-settings.png" alt="Stilltype Android Settings screen" width="230" />
+  <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/android-settings.png" alt="Stilltype Android Settings screen" width="230" />
 </p>
 
 <p align="center"><sub>Android Dictate, compact capture, and Settings — real app states, shown at phone scale.</sub></p>
@@ -38,8 +38,8 @@ Stilltype reads silently mouthed words from your camera and turns them into edit
 <details>
   <summary>Quick Settings shortcut and Android dark mode</summary>
   <p align="center">
-    <img src="docs/screenshots/android-quick-settings.png" alt="Stilltype tile in Android Quick Settings" width="260" />
-    <img src="docs/screenshots/android-dictate-dark.png" alt="Stilltype Android Dictate in dark mode" width="260" />
+    <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/android-quick-settings.png" alt="Stilltype tile in Android Quick Settings" width="260" />
+    <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/android-dictate-dark.png" alt="Stilltype Android Dictate in dark mode" width="260" />
   </p>
 </details>
 
@@ -91,7 +91,7 @@ The export derives a CTC-only mobile graph (~170&nbsp;MB INT8) from the same 202
 | Android | Native APK builds and runs. Real API&nbsp;36 x86_64 emulator inference: 633&nbsp;ms load, 2.77&nbsp;s warm for 200 frames; sampled process PSS about 706&nbsp;MiB. **Not physical-phone measurements or accuracy.** INT8 is 170&nbsp;MB but changed the fixture text versus FP32; [details and reproducible benchmark](docs/ANDROID.md). |
 | macOS / Windows | Native-host execution still needed. macOS Fn is hold-to-dictate and may need Input&nbsp;Monitoring (restart after granting); most Windows&nbsp;/ Linux firmware reserves Fn, so Ctrl&nbsp;/ Cmd+Shift+Space is the fallback. Wayland may further limit global shortcuts, paste and overlay position — clipboard copy always works. |
 
-<img src="docs/screenshots/overlay-light.png" alt="Stilltype native dictation overlay" width="360" />
+<img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/overlay-light.png" alt="Stilltype native dictation overlay" width="360" />
 
 Desktop beam-search quality does not transfer to CTC-only mobile decoding, and per-frame alignment differs — so paper figures are not repeated here as product accuracy or phone speed. History is stored as local plaintext; retention controls prune it but do not encrypt it.
 
