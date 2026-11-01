@@ -294,6 +294,47 @@ joint-beam decoder on CPU. It recovered rejected clips but raised confirmation
 WER from 236/240 to 244/240 errors. That decoder/gate combination was rejected;
 the Android improvement does not establish a benefit for every decoder.
 
+### Rejected silence-confidence experiment
+
+A development probe found that FLARE's first-token EOS probability separated
+20 speech clips from 27 short quiet controls. An EOS veto at probability 0.01
+was fixed before measuring 60 other GRID speech clips and 53 new annotated
+quiet regions from them. It retained all 60 speech clips, rejected all 53
+quiet regions, and retained all nine natural-source test clips.
+
+However, **the rule failed a duration stress test**. Extending each of the 53
+quiet regions to 200 frames by repeating its final frame caused none to meet
+the EOS veto. Two static-face controls also passed the EOS check. Combining
+the veto with a motion threshold of 4 would admit 8/53 edge-padded controls.
+These are synthetic stress inputs, not 55 new natural recordings; they expose
+a duration dependence that the short-quiet comparison missed. The EOS veto
+was rejected, not retuned against these results or shipped.
+
+The existing INT8 CTC-evidence gate rejected all 53 fresh short quiet regions
+and all 53 corresponding edge-padded controls in a separate host CPU probe.
+Only 6 short and 8 padded regions passed its weak-motion check; CTC evidence
+rejected the remainder. These probes use desktop-aligned ROIs sliced from
+full-clip context, unlike the earlier separately prepared 27 regions. They
+are neither physical-phone checks nor a general false-activation guarantee.
+
+### Alternative-hypothesis selection
+
+The unchanged beam-50 model returned 50 finite-scored hypotheses for each of
+the eight natural development clips, with exact top-1 text parity and no
+failures. Reference-selected best candidates within the top 5, 10 and 50
+would leave 34, 32 and 26 errors out of 141 words, respectively, versus the
+actual top-1 result of 46. These are **diagnostic oracle bounds**, not an
+implemented reranker's accuracy. Even the top-50 bound cannot halve those
+46 development errors through candidate selection alone.
+
+A reference-free uniform word-edit consensus selector reduced development
+errors to 43/141. Its rule was fixed before applying it to the nine existing
+natural test clips: select the candidate with the lowest mean word-edit
+distance to all 50 returned hypotheses, with visual-rank tie breaking. Test
+errors rose from 34/148 to 38/148, so it was not adopted. Two posterior-weighted
+development variants also failed to beat the uniform selector. This remains
+one-source exploratory evidence, not a new independent speaker population.
+
 ## Portable FLARE research utilities
 
 `tools/export_flare.py` exports the pinned Base encoder and next-token decoder
