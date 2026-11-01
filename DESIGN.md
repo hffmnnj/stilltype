@@ -96,7 +96,7 @@ components:
 
 ## Overview
 
-Stilltype is a local-first silent dictation instrument for quiet work. The main screen answers whether the camera and model are ready, then turns a silently mouthed sentence into editable text. Its closed-mouth seam is the signature, never a microphone or audio waveform. Tauri 2, Rust and React target Windows, Linux and macOS. Use shadcn/Radix primitives and Lucide icons. Keyboard-first: a global shortcut, a command menu and bottom navigation on small screens. This file is the token source; keep it and CSS aligned.
+Stilltype is a local-first silent dictation instrument for quiet work. The main screen answers whether the camera and model are ready, then turns a silently mouthed sentence into editable text. Its generated brand mark, a warm vermilion mouth on near-black, is the signature, never a microphone or audio waveform. Tauri 2, Rust and React target Windows, Linux and macOS. Use shadcn/Radix primitives and Lucide icons. Keyboard-first: a global shortcut, a command menu and bottom navigation on small screens. This file is the token source; keep it and CSS aligned.
 
 ## Colors
 
@@ -125,14 +125,14 @@ Controls have 6 px radius, panels 12 px and the overlay 18 px. Record stays circ
 - Switches: labeled Radix switches with visible state.
 - Tabs: use Radix tabs only for sibling settings groups.
 - Camera stage: real preview when available; deliberate face guide and actionable denied/no-device state otherwise.
-- Overlay: a compact 360 px native window with a seam mark, short status text, tabular elapsed time and compact row actions plus quiet dismiss. It never shows a waveform or invented activity.
+- Overlay: a compact 360 px native window with the generated brand mark, short status text, tabular elapsed time and compact row actions plus quiet dismiss. It never shows a waveform or invented activity.
 - History: date-grouped editable rows, raw/cleaned text, favorite, copy and delete. Never seed invented dictations.
 - Model setup: real 2026 recognition engine information, explicit download consent, meaningful progress, GPU-first and CPU selection, and real readiness. Transcript cleanup is a bundled local text model with its own consent, status and toggle; no network service is involved.
 - Preview overlay: the same overlay presentation rendered inline in Settings with live readiness, for inspection without hardware.
 
 ## Do's and Don'ts
 
-- Do keep the name and closed-mouth mark visible for recognition.
+- Do keep the name and generated brand mark visible for recognition.
 - Do show real local state and zero history because fabricated data destroys trust.
 - Do derive guidance from the actual face detector.
 - Don't use purple gradients, fake accuracy percentages, KPI grids or audio waveforms.
@@ -152,7 +152,7 @@ Controls have 6 px radius, panels 12 px and the overlay 18 px. Record stays circ
 - Fn is always hold-to-dictate; the configured shortcut respects the hold/toggle mode; tray is toggle. On macOS the Fn key needs Input Monitoring permission and a restart after granting it; on Linux and Windows the firmware usually reserves Fn, so the configured shortcut is the reliable trigger.
 - A main-window preview action publishes honest current readiness through overlay_action preview without starting capture or opening the camera. Normal in-window capture does not show the overlay.
 - Capture runs on a bounded timer cadence, not animation frames, so capture timing is paint-independent; background throttling is still platform-dependent, so hidden-window capture is not guaranteed on every OS.
-- Recording shows stop, elapsed time and a limit. Frame writes finish before transcription.
+- Recording shows stop, elapsed time and the configured limit (default 2 minutes, adjustable within 3–120 s on desktop and Android). Frame writes finish before transcription.
 - Data stays local. Downloads are intentional. Transcript cleanup runs through the bundled engine only.
 - Respect reduced motion. Transitions are 120–180 ms opacity/transform, no ornamental loops. Focus stays visible.
 - Dictate stays mounted during navigation so an explicitly enabled camera and native shortcut continue working; the persistent shell exposes camera state. Recording does not pulse.
@@ -179,7 +179,7 @@ Use neutral surfaces and precise rows. Export actual history only. Privacy state
 
 Use Jetpack Compose Material 3 with the same neutral light/dark roles and bundled Geist typography. A compact bottom bar carries Dictate, History, Vocabulary and Settings; model readiness belongs to Dictate and the Models destination reachable from setup and Settings. Camera and model states are real and permission-driven. Quick Settings and a pinned launcher shortcut open a compact capture activity; do not request draw-over-apps or Accessibility privileges. The capture activity returns to the previous app after Copy or Share. No microphone is requested. Stop the camera on backgrounding and cancellation.
 
-Android keeps editable history, favorites, vocabulary, retention, TXT/JSON/CSV export and theme/device preferences. Use 48 dp targets, safe-area insets, flexible text and platform Back. Never seed demo transcripts. Mobile recognition is explicitly the optimized CTC inference mode of the same 2026 weights; do not carry desktop beam-search accuracy or H200 speed figures into phone claims. The Models surface shows actual asset verification and model preparation, not a fictional download.
+Android keeps editable history, favorites, vocabulary, retention, TXT/JSON/CSV export and theme/device preferences. Use 48 dp targets, safe-area insets, flexible text and platform Back. Never seed demo transcripts. Recording sessions run up to the configured limit (default 2 minutes); Android retains up to 3001 detected mouth frames per session while recognition scores them in internal 200-frame model windows over 8-second inference chunks. The 8-second figure is an internal inference window, never a user-facing auto-stop. Mobile recognition is explicitly the optimized CTC inference mode of the same 2026 weights; do not carry desktop beam-search accuracy or H200 speed figures into phone claims. The Models surface shows actual asset verification and model preparation, not a fictional download.
 
 ## Decisions
 
@@ -190,4 +190,6 @@ Android keeps editable history, favorites, vocabulary, retention, TXT/JSON/CSV e
 | 2026-11-01 | Neutral system-UI direction, no serif or editorial voice | Requested Vercel, Stripe and Apple quality; monochrome tokens with restrained functional color. Superseded the same day: user asked for Geist Sans and the new Geist Serif (see next row). |
 | 2026-11-01 | Geist Sans + Geist Serif Regular | User request; Sans for controls, body, transcript and overlay, Serif Regular for the wordmark and page headings only at 26 px. |
 | 2026-11-01 | Native overlay with main-owned snapshots | Follows dictation from any app without invented activity; one capture owner keeps event ordering race-safe. |
+| 2026-11-01 | Two-minute recording limit on desktop and Android | User request; 8 seconds remains an internal inference window only, never a user-facing auto-stop. |
 | 2026-11-01 | Bundled transcript cleanup, no network service | Local-first cleanup through the bundled engine with explicit consent and status. |
+| 2026-11-01 | Generated raster brand mark, no drawn geometry | User request: generated warm vermilion mouth on near-black. Source public/brand/stilltype-icon-generated.png; web app mark, favicon and decorative seam use the public/brand/stilltype-mark.png derivative. Android uses drawable-nodpi/stilltype_brand.png and stilltype_launcher.png with bitmap wrappers; Quick Settings uses the platform camera glyph. No SVG, Canvas or Path brand art remains; camera guides and functional icons are unchanged. |

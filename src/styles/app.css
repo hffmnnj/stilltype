@@ -199,18 +199,11 @@ code {
   font: 400 18px/1 var(--display);
   letter-spacing: 0;
 }
-.mark-bg {
-  fill: var(--stage);
-}
-.mark-lips {
-  stroke: var(--on-stage);
-  opacity: 0.55;
-}
-.mark-seam {
-  stroke: var(--stage-accent);
-}
-:root:not([data-theme='dark']) .mark-seam {
-  stroke: #ff5a36;
+.mark,
+.seam {
+  object-fit: cover;
+  border-radius: 6px;
+  aspect-ratio: 1;
 }
 .nav {
   display: flex;
@@ -515,9 +508,6 @@ textarea.field {
   padding: 48px 0;
   max-width: 52ch;
   color: var(--muted);
-}
-.empty .seam {
-  color: var(--primary);
 }
 .empty-title {
   font: 600 20px/1.3 var(--sans);
@@ -959,7 +949,6 @@ textarea.field {
   text-align: center;
 }
 .stage-empty .seam {
-  color: var(--stage-accent);
   margin-bottom: 4px;
 }
 .stage-line {
