@@ -148,13 +148,16 @@ fn emit(app: &AppHandle, stage: &'static str, message: &str, progress: f64) {
 
 pub fn status(data: &Path, cache: &Mutex<Option<Runtime>>, choice: &str) -> Status {
     let recommendation = recommended(memory().0);
+    let available = candidates(data, choice, recommendation);
     let runtime = cache.try_lock().ok();
     let cached = runtime.as_ref().and_then(|slot| slot.as_ref());
     let selected_index = if choice == "auto" {
         cached
+            .filter(|r| r.available_models == available)
             .and_then(|r| {
-                candidates(data, choice, recommendation)
-                    .into_iter()
+                available
+                    .iter()
+                    .copied()
                     .find(|&i| MODELS[i].id == r.model_id)
             })
             .unwrap_or_else(|| selected(data, choice, recommendation))
@@ -331,7 +334,9 @@ pub fn run(
                     return Err("Install the cleanup model first".into());
                 }
                 let reusable = runtime.as_ref().is_some_and(|r| {
-                    r.mode == device_mode && options.iter().any(|&i| MODELS[i].id == r.model_id)
+                    r.mode == device_mode
+                        && r.available_models == options
+                        && options.iter().any(|&i| MODELS[i].id == r.model_id)
                 });
                 if !reusable {
                     *runtime = None;
@@ -363,7 +368,8 @@ pub fn run(
                             }
                         })();
                         match attempt {
-                            Ok(r) => {
+                            Ok(mut r) => {
+                                r.available_models = candidates(&data, &choice, recommended(total));
                                 *runtime = Some(r);
                                 break;
                             }
@@ -405,6 +411,7 @@ pub struct Runtime {
     pub device: String,
     pub mode: String,
     pub model_id: &'static str,
+    available_models: Vec<usize>,
 }
 
 fn choose_gpu(
@@ -466,6 +473,7 @@ impl Runtime {
             device,
             mode: mode.into(),
             model_id,
+            available_models: Vec::new(),
         })
     }
 
@@ -797,6 +805,50 @@ mod tests {
             "hardware"
         );
     }
+    #[test]
+    #[ignore]
+    fn real_auto_rechecks_newly_available_tiers_before_reusing_cache() {
+        assert!(
+            memory().0 >= 12 * 1024_u64.pow(3),
+            "Requires a machine eligible for 2B"
+        );
+        let path = std::env::var("STILLTYPE_CLEANUP_TEST_MODEL").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(model_dir(dir.path())).unwrap();
+        fs::hard_link(&path, model_path(dir.path(), &MODELS[0])).unwrap();
+        fs::write(model_dir(dir.path()).join(MODELS[0].marker), MODELS[0].sha).unwrap();
+        let cache = Arc::new(Mutex::new(None));
+        let correct = || {
+            run(
+                cache.clone(),
+                dir.path().into(),
+                "cpu".into(),
+                "auto".into(),
+                CleanupMode::Format,
+                "hello world".into(),
+                String::new(),
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        assert_eq!(words(&correct()), words("hello world"));
+
+        // Readiness sees the new tier; loading must verify it rather than reuse 0.8B.
+        let new_tier = fs::File::create(model_path(dir.path(), &MODELS[1])).unwrap();
+        new_tier.set_len(MODELS[1].size).unwrap();
+        let marker = model_dir(dir.path()).join(MODELS[1].marker);
+        fs::write(&marker, MODELS[1].sha).unwrap();
+        assert_eq!(words(&correct()), words("hello world"));
+        assert!(
+            !marker.exists(),
+            "Auto did not attempt the newly available tier"
+        );
+        assert_eq!(
+            cache.lock().unwrap().as_ref().unwrap().model_id,
+            MODELS[0].id
+        );
+    }
+
     #[test]
     #[ignore]
     fn real_model() {

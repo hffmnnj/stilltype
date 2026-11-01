@@ -9,7 +9,7 @@
 - **The only intentional downloads** are the USR 2.0 recognition checkpoint
   (after you explicitly accept its licence), the small YuNet face-tracking
   artifact fetched once by `scripts/prepare-vision.mjs` (SHA256-verified,
-  ~230 kB), the optional text-cleanup GGUF (~580 MB, consent-gated and
+  ~230 kB), the optional Qwen text-cleanup GGUF (0.58–3.01 GB by tier, consent-gated and
   SHA256-verified before use — see [docs/BUILDING.md](docs/BUILDING.md)),
   and the Python runtime packages
   listed in `engine/requirements.txt`. Each is fetched over HTTPS from its
@@ -51,6 +51,14 @@ late recognition results from a cancelled session are not saved.
 - **Lipreading is experimental.** Visually ambiguous words are a correctness
   property, not a security boundary — review pasted text before sending it
   anywhere sensitive.
+- **Intent correction can change wording.** It is optional, off by default,
+  and preserves the original recognition. Edit, number, negation and vocabulary
+  guards reduce risk; they cannot prove that the meaning stayed the same.
+- **Model loading is not a sandbox against your own account.** Pinned checksums
+  verify downloaded bytes. A process with write access to app data can replace
+  a model between verification and the native loader reopening its path, or
+  modify other application files. Protect the account and app-data directory;
+  checksums do not isolate Stilltype from another process running as you.
 - **Copy and Share are intentional disclosures.** Copied text is available to
   the OS clipboard and apps allowed to read it. Android exports are shared
   through a temporary FileProvider URI permission to the app you choose.

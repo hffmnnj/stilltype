@@ -21,6 +21,8 @@ Local changes to third-party files are kept minimal and noted where they occur.
 | --- | --- | --- |
 | USR 2.0 Base+ high-resource full-model checkpoint (`models/usr2/baseplus.pth`, ~1.39 GB / ~1.3 GiB) | Downloaded only after explicit `--accept-license` consent in `engine/install.py` (fetched with `gdown`), or via the app's Models page | Pretrained research/data rights are **separate from the code licence** — check upstream before your intended use |
 | Qwen3.5-0.8B text-cleanup GGUF (`models/cleanup/qwen3.5-0.8b-q4_k_m.gguf`, 579,615,840 bytes / ~580 MB) | Separate consent-gated pinned HTTPS download, SHA256-verified before use (`fb044e93939a70469c905781334f5de1e6c8b608ced6cbc8c9249bd4127d9526`); never in git | Apache-2.0 ([Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B), created 2026-02-28; GGUF from [bartowski/Qwen_Qwen3.5-0.8B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen3.5-0.8B-GGUF) at revision `f36b1ea49a332ede8fe5f389bbf5b3575ef71f48`, text cleanup only, no image projector) |
+| Qwen3.5-2B text-cleanup GGUF (1,396,198,496 bytes) | Separate consent-gated pinned HTTPS download; exact revision and SHA-256 in [BUILDING.md](docs/BUILDING.md); never in git | Apache-2.0 ([Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B); [GGUF packaging](https://huggingface.co/bartowski/Qwen_Qwen3.5-2B-GGUF), created 2026-03-01) |
+| Qwen3.5-4B text-cleanup GGUF (3,013,027,808 bytes) | Separate consent-gated pinned HTTPS download; exact revision and SHA-256 in [BUILDING.md](docs/BUILDING.md); never in git | Apache-2.0 ([Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B); [GGUF packaging](https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF), created 2026-02-27) |
 
 `engine/install.py` verifies the checkpoint SHA256
 (`4ab1f3f230aa6a724bcc698db8a17f2f54919136d2885c1a07a6b69247012773`)
@@ -73,8 +75,8 @@ with weights. The copied token and mean-face data retain upstream provenance.
 - **llama-cpp-2 0.1.160** (maintained safe Rust bindings for `llama.cpp`,
   exact pinned version) — [utilityai/llama-cpp-rs](https://github.com/utilityai/llama-cpp-rs);
   MIT OR Apache-2.0. Distributed here under MIT, copyright Dial AI; [complete notice](src-tauri/licenses/llama-cpp-rs-MIT.txt) is bundled with the app.
-- **Qwen3.5-0.8B** (optional text-cleanup weights only — punctuation and
-  capitalization tidy, raw recognition text always kept) —
+- **Qwen3.5 0.8B / 2B / 4B** (optional text-only cleanup weights; Format or
+  experimental Intent correction, raw recognition text always kept) —
   [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B), Apache-2.0;
   GGUF packaging from
   [bartowski/Qwen_Qwen3.5-0.8B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen3.5-0.8B-GGUF).
