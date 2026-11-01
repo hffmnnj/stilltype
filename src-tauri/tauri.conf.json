@@ -1,0 +1,77 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Stilltype",
+  "version": "0.1.0",
+  "identifier": "com.stilltype.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Stilltype",
+        "width": 1320,
+        "height": 900,
+        "minWidth": 880,
+        "minHeight": 640,
+        "backgroundThrottling": "disabled"
+      },
+      {
+        "label": "overlay",
+        "title": "Stilltype Dictation",
+        "url": "index.html?overlay",
+        "width": 420,
+        "height": 160,
+        "visible": false,
+        "focus": false,
+        "focusable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "license": "MIT",
+    "copyright": "Copyright 2026 Stilltype contributors",
+    "category": "Productivity",
+    "shortDescription": "Local-first silent dictation",
+    "targets": "all",
+    "resources": {
+      "licenses/*.txt": "licenses/",
+      "../engine/*.py": "engine/",
+      "../engine/requirements.txt": "engine/requirements.txt",
+      "../engine/espnet/asr/*.py": "engine/espnet/asr/",
+      "../engine/espnet/nets/*.py": "engine/espnet/nets/",
+      "../engine/espnet/nets/pytorch_backend/*.py": "engine/espnet/nets/pytorch_backend/",
+      "../engine/espnet/nets/pytorch_backend/backbones/*.py": "engine/espnet/nets/pytorch_backend/backbones/",
+      "../engine/espnet/nets/pytorch_backend/backbones/modules/*.py": "engine/espnet/nets/pytorch_backend/backbones/modules/",
+      "../engine/espnet/nets/pytorch_backend/transformer/*.py": "engine/espnet/nets/pytorch_backend/transformer/",
+      "../engine/espnet/nets/scorers/*.py": "engine/espnet/nets/scorers/",
+      "../engine/espnet/utils/*.py": "engine/espnet/utils/",
+      "../engine/espnet/LICENSE": "engine/espnet/LICENSE",
+      "../engine/usr2/20words_mean_face.npy": "engine/usr2/20words_mean_face.npy",
+      "../engine/usr2/LICENSE": "engine/usr2/LICENSE",
+      "../engine/usr2/labels/unigram1000_units.txt": "engine/usr2/labels/unigram1000_units.txt"
+    },
+    "macOS": {
+      "infoPlist": "Info.plist"
+    },
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
