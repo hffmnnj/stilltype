@@ -56,7 +56,7 @@ Stilltype reads silently mouthed words from your camera and turns them into edit
 ## What you get
 
 - **Two-minute dictation.** Record up to two minutes on every platform, with camera guidance, elapsed time and a configurable limit. Bounded inference windows keep long recordings manageable instead of discarding everything after eight seconds.
-- **Fast or Quality on Android.** Keep the lightweight default, or prepare the optional 2026 FLARE model for full beam-50 decoding and centered face/lip alignment. Quality needs an 8 GB-class device and separate non-commercial-model consent; it trades more time and memory for stronger measured recognition.
+- **Fast or Quality on Android.** Keep the lightweight default, or prepare the optional 2026 FLARE model for full beam-50 decoding and centered face/lip alignment. Quality needs an 8 GB-class device and separate non-commercial-model consent. It improves ordinary-speech video benchmarks at a higher time and memory cost; silent-mouthing accuracy remains experimental.
 - **Native shortcut overlay.** A compact always-on-top capsule that follows dictation without pulling you out of your current app — opening, recording, processing, result and error states with Stop / Cancel / Dismiss plus Copy and Open where they apply.
 - **Editable history.** Searchable, date-grouped dictations with raw and cleaned text, favorites, copy and delete. Nothing is ever seeded.
 - **Vocabulary.** Case-insensitive word and phrase replacements with canonical spelling and capitalization.
@@ -68,7 +68,7 @@ Stilltype reads silently mouthed words from your camera and turns them into edit
 camera → face + mouth alignment → visual recognition → text → optional local cleanup → copy / paste / export
 ```
 
-The cleanup pass only tidies punctuation and capitalization, preserves your wording, and always keeps the raw text. There is no inference server to call.
+Desktop cleanup defaults to punctuation and capitalization while preserving your wording. Optional **Intent** mode attempts bounded word corrections, but can be wrong and has not consistently improved held-out recognition. Both modes retain the raw text. There is no inference server to call.
 
 ## Quickstart
 
@@ -81,7 +81,7 @@ npm ci
 npm run desktop   # full Tauri app: camera, shortcut, local inference
 ```
 
-Then open the **Models** page and consent to the recognition checkpoint: the pinned 2026 USR&nbsp;2 Base+ weights (~1.39&nbsp;GB), GPU (CUDA&nbsp;/ MPS) preferred with a real CPU mode. The optional cleanup model is a separate consent-gated download: compiled-in `llama.cpp` through `llama-cpp-2` 0.1.160 with a 2026 Q4 text model (~580&nbsp;MB). Build an installer on the host you ship for with `npm run desktop:build`.
+Then open the **Models** page and consent to the recognition checkpoint: the pinned 2026 USR&nbsp;2 Base+ weights (~1.39&nbsp;GB), GPU (CUDA&nbsp;/ MPS) preferred with a real CPU mode. Optional cleanup uses compiled-in `llama.cpp` through `llama-cpp-2` 0.1.160 with separately consented 2026 Qwen3.5 Q4 models: 0.8B (~580&nbsp;MB), 2B (~1.40&nbsp;GB), or 4B (~3.01&nbsp;GB), with capacity-based Auto selection. Build an installer on the host you ship for with `npm run desktop:build`.
 
 ### Android
 
@@ -105,6 +105,8 @@ The Fast export derives a CTC-only mobile graph (~170&nbsp;MB INT8) from the sam
 <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/overlay-light.png" alt="Stilltype native dictation overlay" width="360" />
 
 Desktop beam-search quality does not transfer to Fast's CTC-only mobile decoding. Quality uses a different research model and centered alignment; its measured gains and remaining failures are [disclosed separately](docs/RECOGNITION.md#two-additional-speakers), not advertised as 90% product accuracy or phone speed. History is local plaintext; retention controls prune it but do not encrypt it.
+
+**Genuine silent mouthing remains a major limitation.** A separate one-speaker development comparison found 69.57% WER even with the best experimental 7B visual model, which is not the APK engine. Ordinary spoken-video gains do not establish silent-dictation accuracy. [Source, all model results and limitations](docs/RECOGNITION.md#genuine-silent-mouthing-diagnostic).
 
 The complete two-minute path was exercised too: 3,001 frames through the real
 desktop recognizer and the Android recognizer, plus an actual Android camera
