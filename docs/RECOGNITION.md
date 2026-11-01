@@ -410,6 +410,33 @@ bearing metadata before inference, although references were not model inputs.
 That negative probe is therefore not claimed fully blind. Production sampling
 was not changed.
 
+### Phone-geometry and reference diagnostics
+
+An isolated host approximation of Android's per-frame four-landmark alignment
+gave 28/170 development errors with FP32 FLARE beam 5, versus 20/170 with the
+centered-smoothed geometry. A causal trailing-13-point mean, retaining the
+current frame's centroid, gave 24/170. These runs used the same JPEGs, detected
+landmarks and sampling; all 12 clips decoded. Stored host landmarks are rounded,
+whereas the phone detects landmarks on uncompressed bitmaps, so this is not
+native preprocessing parity.
+
+The current INT8 CTC-evidence path showed a different sensitivity on those same
+development clips: 44/170 errors with centered smoothing, 47/170 per frame and
+40/170 with the causal mean. No geometry default is changed by a development
+score alone; held-out, quiet-input and actual Android checks remain necessary.
+
+An independent **audio-only reference audit**, not a Stilltype inference path,
+used the 2026 [Qwen3-ASR-0.6B native conversion](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf)
+at revision `7f1569a48a89f3e3f4dc3a5c9d28bddd903bc76c`. It transcribed the
+unchanged 12 development intervals without caption context. The ASR and caption
+text disagreed by 13 word edits out of 170 words; only three complete clips
+matched after normalization. This is an automated disagreement diagnostic,
+**not proof that ASR or captions are correct**. The original references and
+ranges remain unchanged. Neither the audio nor ASR output entered visual
+recognition, visual candidate selection, or Intent correction. The model ran
+locally in a separate environment; it is not an app dependency or microphone
+feature. Human-verified references are still needed for strong accuracy claims.
+
 ## Portable FLARE research utilities
 
 `tools/export_flare.py` exports the pinned Base encoder and next-token decoder
@@ -526,3 +553,49 @@ graph loading and preparation. Android ORT also produced the exact independent
 [ANDROID.md](ANDROID.md#batched-beam-benchmark). Near-tied candidates can remain
 numerically sensitive across runtimes, and these checks are not population-level
 accuracy or physical-phone speed evidence.
+
+### Compact weight storage
+
+`tools/pack_flare.py` creates a smaller copy of a trusted beam-5 export:
+
+```sh
+"$RUNTIME_PY" tools/pack_flare.py --model-dir /path/flare-beam-onnx \
+  --output /path/flare-compact --accept-license
+"$RUNTIME_PY" tools/benchmark_flare.py --model-dir /path/flare-compact \
+  --sample /path/visual-only.npz --output /path/compact-android-fixture
+```
+
+The packer also needs NumPy and ONNX. It verifies all three source graph sizes
+and hashes before parsing any graph, preserves model provenance and license,
+rejects external tensor dependencies, and refuses existing output or Git
+destinations. A failed transformation can leave partial graph files, but no
+successful metadata. Graph hashes prove consistency, not independent authenticity;
+the input export must be trusted.
+
+Eligible large FLOAT initializers are stored as FP16 and restored by ordinary
+FLOAT Cast nodes. The original operations and FP32 input/output computation stay
+unchanged, apart from weight rounding. Small, non-floating, graph-input,
+non-finite and out-of-range initializers remain unchanged. This is a storage
+transformation, not newly trained weights, FP16 computation, or a guarantee of
+smaller runtime memory: ORT can fold the casts back into FP32 constants.
+
+| Graph | Original bytes | Compact bytes |
+| --- | ---: | ---: |
+| Encoder | 436,922,177 | 219,664,435 |
+| Cross projections | 18,921,293 | 9,485,105 |
+| Batched decoder | 211,144,782 | 108,950,286 |
+| Total | 666,988,252 | 338,099,826 |
+
+That is **49.31% less graph storage**. The final utility produced the same graph
+bytes as the measured prototype. All 40 complete development, test and
+confirmation token sequences matched the original FP32 beam-5 output, so its
+20/170, 56/204 and 42/258 error counts were unchanged. This does not recover
+beam-50 accuracy or guarantee parity on every input. Actual Android ORT also
+matched the independent 29-token fixture using the compact graphs; see
+[ANDROID.md](ANDROID.md#compact-graph-compatibility).
+
+A separate constant-matrix dynamic-INT8 candidate shrank the graphs further
+but increased development errors from 20/170 to 22/170. Restoring FP32 cross
+projections and decoder while retaining the INT8 encoder still gave 22/170.
+Those candidates were not run on held-out data or adopted. Smaller files alone
+are not sufficient evidence of a better recognizer.
