@@ -43,9 +43,20 @@ Stilltype reads silently mouthed words from your camera and turns them into edit
   </p>
 </details>
 
+<details>
+  <summary>Android Quality mode, model readiness, and matching controls</summary>
+  <p align="center">
+    <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/android-quality-dictate.png" alt="Stilltype Android with the optional Quality model ready and camera off" width="230" />
+    <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/android-quality-models.png" alt="Separate Fast and Quality model readiness and non-commercial attribution" width="230" />
+    <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/android-quality-settings.png" alt="Stilltype Android Fast or Quality recognition selection, Auto compute, and two-minute limit" width="230" />
+  </p>
+  <p align="center"><sub>Real Android emulator captures. Quality is optional, memory-intensive, and not a physical-phone accuracy claim.</sub></p>
+</details>
+
 ## What you get
 
 - **Two-minute dictation.** Record up to two minutes on every platform, with camera guidance, elapsed time and a configurable limit. Bounded inference windows keep long recordings manageable instead of discarding everything after eight seconds.
+- **Fast or Quality on Android.** Keep the lightweight default, or prepare the optional 2026 FLARE model for full beam-50 decoding and centered face/lip alignment. Quality needs an 8 GB-class device and separate non-commercial-model consent; it trades more time and memory for stronger measured recognition.
 - **Native shortcut overlay.** A compact always-on-top capsule that follows dictation without pulling you out of your current app — opening, recording, processing, result and error states with Stop / Cancel / Dismiss plus Copy and Open where they apply.
 - **Editable history.** Searchable, date-grouped dictations with raw and cleaned text, favorites, copy and delete. Nothing is ever seeded.
 - **Vocabulary.** Case-insensitive word and phrase replacements with canonical spelling and capitalization.
@@ -81,19 +92,19 @@ cd android
 ./gradlew :app:assembleDebug -PmobileModelDir=/absolute/path/to/export
 ```
 
-The export derives a CTC-only mobile graph (~170&nbsp;MB INT8) from the same 2026 weights; weights are never committed to git. Built without the property, the APK honestly reports the model as not bundled. On the phone, a Quick&nbsp;Settings tile and a pinned Dictate shortcut open a small visible capture activity — no Accessibility or overlay permission, no background camera. The manifest requests camera only: no microphone, and the APK declares no Internet permission.
+The Fast export derives a CTC-only mobile graph (~170&nbsp;MB INT8) from the same 2026 weights. Optional Quality adds a separate ~338&nbsp;MB FLARE pack with `-PqualityModelDir=/absolute/path/to/quality-pack`; [preparation, terms and memory requirements](docs/ANDROID.md#optional-quality-pack). Weights are never committed to git. Missing build properties honestly report the corresponding pack as not bundled. A Quick&nbsp;Settings tile and a pinned Dictate shortcut open a small visible capture activity — no Accessibility or overlay permission, no background camera. The manifest requests camera only: no microphone, and no Internet permission.
 
 ## Tested status
 
 | Platform | State |
 | --- | --- |
 | Linux desktop | Builds, launches, and transcribes — an 8.28&nbsp;s public clip decoded at beam&nbsp;5 in 4.117&nbsp;s (CUDA) and 20.904&nbsp;s (CPU). Runtime smoke only, not an accuracy benchmark. Compiled-in cleanup returned identical punctuation on CPU and Vulkan. |
-| Android | Native APK builds and runs. Real API&nbsp;36 x86_64 emulator inference: 633&nbsp;ms load, 2.77&nbsp;s warm for 200 frames; sampled process PSS about 706&nbsp;MiB. **Not physical-phone measurements or accuracy.** INT8 is 170&nbsp;MB but changed the fixture text versus FP32; [details and reproducible benchmark](docs/ANDROID.md). |
+| Android | Native APK builds and runs. Fast and optional Quality both complete the 3,001-frame / two-minute recognizer journey. Quality also passes independent raw-reference, quiet-veto, CPU/Auto and cancellation checks on an 8&nbsp;GiB API&nbsp;36 emulator. **Not physical-phone speed or accuracy.** [Timings, memory limits and reproducible checks](docs/ANDROID.md). |
 | macOS / Windows | Native-host execution still needed. macOS Fn is hold-to-dictate and may need Input&nbsp;Monitoring (restart after granting); most Windows&nbsp;/ Linux firmware reserves Fn, so Ctrl&nbsp;/ Cmd+Shift+Space is the fallback. Wayland may further limit global shortcuts, paste and overlay position — clipboard copy always works. |
 
 <img src="https://raw.githubusercontent.com/hffmnnj/stilltype/main/docs/screenshots/overlay-light.png" alt="Stilltype native dictation overlay" width="360" />
 
-Desktop beam-search quality does not transfer to CTC-only mobile decoding, and per-frame alignment differs — so paper figures are not repeated here as product accuracy or phone speed. History is stored as local plaintext; retention controls prune it but do not encrypt it.
+Desktop beam-search quality does not transfer to Fast's CTC-only mobile decoding. Quality uses a different research model and centered alignment; its measured gains and remaining failures are [disclosed separately](docs/RECOGNITION.md#two-additional-speakers), not advertised as 90% product accuracy or phone speed. History is local plaintext; retention controls prune it but do not encrypt it.
 
 The complete two-minute path was exercised too: 3,001 frames through the real
 desktop recognizer and the Android recognizer, plus an actual Android camera
@@ -107,4 +118,5 @@ they establish execution, not natural-speech accuracy.
 - [docs/RECOGNITION.md](docs/RECOGNITION.md) — raw word-error measurement, fixed evaluation sets and accuracy limits.
 - [SECURITY.md](SECURITY.md) — what stays local, what is ephemeral, how to report issues.
 - Recognition: [USR&nbsp;2.0 repository](https://github.com/ahaliassos/usr2) · [paper](https://arxiv.org/abs/2602.19316). Code is MIT; the pretrained checkpoint carries separate research&nbsp;/ data rights — check upstream before your intended use (see [THIRD_PARTY.md](THIRD_PARTY.md)).
+- Optional Android Quality: [FLARE checkpoints](https://huggingface.co/Anony94/FLARE-checkpoints), **CC-BY-NC-4.0**. The app's MIT license does not remove the model's non-commercial restriction.
 - App code is MIT ([LICENSE](LICENSE)). No signing, no public prebuilt releases yet — build from source for now.
