@@ -19,3 +19,8 @@ runtime/
 public/vision/ort/
 public/vision/face_detection_yunet_2026may.onnx
 public/vision/*.part
+android/.gradle/
+android/**/build/
+android/local.properties
+android/app/src/main/assets/recognition/
+*.onnx.data
