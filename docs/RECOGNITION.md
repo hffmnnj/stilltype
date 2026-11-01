@@ -861,6 +861,33 @@ non-commercial terms still apply. The personal path is ungated; the application
 retains its existing quiet-input checks and models. These weights are not
 bundled in the delivered APK.
 
+#### Development-only decoding follow-up
+
+After the session 005 evaluation was fixed, a separate CPU-only diagnostic
+generated fifty visual hypotheses for each of the twelve original development
+clips. All 600 hypotheses had finite scores and the complete trained state
+groups matched. Eleven normalized top-one texts matched CUDA; one near-tie
+swapped the first two candidates, whose CPU visual-score gap was 0.000141.
+The CPU raw control therefore had **47/161** errors rather than CUDA's 46/161.
+This is not bit-identical cross-device decoding.
+
+A fixed uniform word-edit medoid over all fifty hypotheses gave **44/161**
+errors. Separately, unchanged production Qwen3.5 4B Intent received each CPU
+top-one text plus up to four alternatives from its first five distinct visual
+hypotheses, with opaque IDs and no reference or external hints. It also gave
+**44/161**, retaining one raw fallback after the correction-limit guard rejected
+an output. The complete CPU correction process, including model load, took
+78.32 seconds; this excludes visual inference and capture. Both candidates
+failed the fixed at-most-39 development rule and received no new held-out run.
+
+Selecting the best hypothesis **with reference text** would give 34/161 errors
+within the first five, 27/161 within ten and 16/161 within fifty. These are
+nondeployable diagnostic lower bounds, **not measured recognition accuracy** or
+evidence that the 10% target has been reached. The frozen CPU candidate SHA-256
+is `f14fdb592faa324e69e7a5d248908b295ea9059b6cc97be63dd001632a31fb2d`;
+the Intent output SHA-256 is
+`60de285fd29b307fe1400a9b3c661e9816399d0d8899421090ed93f587f98648`.
+
 #### Reproduce the personal training recipe
 
 `tools/adapt_flare.py` exposes the fixed recipes without evaluation
