@@ -741,6 +741,21 @@ without error. It failed the predeclared at-most-60 rule and received no fresh
 held-out run. More trainable parameters and lower training loss did not establish
 better recognition.
 
+Preserving more source pixels was also tested without changing frame selection
+or re-detecting landmarks. All 1,462 original development source frames first
+reproduced their stored 640×480 JPEG bytes exactly. The same four landmarks were
+mapped back into the original 1920×1080 source before centered alignment, avoiding
+the early resize/JPEG loss while keeping every frame and the final 96×96 input.
+A paired CPU-only run loaded the identical personal-model state and decoded both
+pixel sets at beam 50. Original pixels gave **71/161** errors, with all twelve
+normalized texts matching the earlier CUDA run; preserved-resolution crops
+worsened to **79/161**. Both runs had finite scores and no failures. The
+coordinator independently reloaded the CPU model and reproduced one complete
+prediction and score for each pixel set. The candidate failed the at-most-60 rule,
+so no new held-out run or camera-path change was made. This tests the unchanged
+model on those pixels, not the potential of retraining with higher-resolution
+crops or a physical-phone pipeline.
+
 #### Reproduce the personal training recipe
 
 `tools/adapt_flare.py` exposes the fixed first-stage recipe without evaluation
