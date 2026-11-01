@@ -305,6 +305,45 @@ demonstrates native graph compatibility, not the user's camera-to-text wait on
 a Pixel. Greedy decoding also had worse host WER than the research beam-50
 decoder, so the current app model remains unchanged.
 
+### Cached decoder benchmark
+
+Export with `--decoder-mode cached`, then run `tools/benchmark_flare.py` as
+described above. Transfer `encoder.onnx`, `cross.onnx` and `decoder-cache.onnx`
+from that export and `face.f32`, `lip.f32`, `manifest.json` from the resulting
+fixture into app-private `files/experimental-flare-cache/`, using the same
+`run-as` method. Run:
+
+```sh
+adb shell am instrument -w -r \
+  -e class 'com.stilltype.android.engine.ExperimentalFlareBenchmarkTest#cachedGraphs_decodeRealFixtureOnCpu' \
+  com.stilltype.android.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The native test checks graph consistency, cache shapes, finite values and
+independent token parity. Zero-length initial caches worked with Android ORT
+1.24.3. Results and tokens stay in private `experimental-flare-cache/results.json`;
+the `stilltypeExperimentalFlareCache` status summary contains no token IDs.
+
+On the same API 36 emulator configuration and 128-frame fixture, the published
+cached graphs generated all 33 expected tokens exactly:
+
+| Stage | Time |
+| --- | ---: |
+| Encoder / cross / decoder session loads | 2,264 / 35 / 549 ms |
+| Encoder execution | 4,291 ms |
+| Cross projections | 67 ms |
+| Complete cached decoding loop, including validation | 1,035 ms |
+| Native decoder calls within that loop | 715 ms |
+| Complete instrumentation test | 10.80 s |
+
+An earlier cached run took 834 ms for the complete decoding loop. The earlier
+full-prefix run took 3,532 ms; these are separate runs, not a controlled phone
+benchmark or camera-to-text latency. Sampled process PSS after the published
+cached run was 1,175,788 KiB, not peak memory. Camera, face analysis, transfer,
+model preparation and graph hashing are outside the stage timings. This is
+still an ungated research decoder, not a new app default or a physical Pixel
+GPU/NPU measurement.
+
 ## Compute notes
 
 `AUTO` requests NNAPI with `CPU_DISABLED`, excluding NNAPI's reference CPU
