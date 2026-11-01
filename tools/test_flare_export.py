@@ -18,6 +18,12 @@ import benchmark_flare
 
 
 class FlareExportGuardTest(unittest.TestCase):
+    def test_beam_size_is_validated_before_accessing_input_files(self):
+        unused = Path("/unused")
+        for mode, size in (("full", 50), ("cached", 50), ("beam", 4), ("beam", 5.0), ("beam", True)):
+            with self.subTest(mode=mode, size=size), self.assertRaisesRegex(ValueError, "beam size"):
+                export_flare.export(unused, unused, unused, unused, "cpu", mode, size)
+
     def test_cached_graphs_are_also_protected_from_overwrite(self):
         output = Path(tempfile.mkdtemp())
         try:
@@ -139,36 +145,56 @@ class BeamDecodeTest(unittest.TestCase):
         self.cross = {f"cross_{i}_{kind}": np.zeros((1, 4, 3, 192), dtype=np.float32)
                       for i, kind in self.names}
 
-    def session(self, scenario):
+    def session(self, scenario, encoder_input=False):
         test = self
         names = self.names
         cross = self.cross
 
         class FakeSession:
+            def __init__(self):
+                self.batches = []
+
             def get_inputs(self):
                 return [SimpleNamespace(name=name) for name in (
                     "tokens", "encoder_padding_mask", *cross,
-                    *(f"past_{i}_{kind}" for i, kind in names))]
+                    *(f"past_{i}_{kind}" for i, kind in names),
+                    *(("encoder_out",) if encoder_input else ()))]
 
             def run(self, output_names, feeds):
                 tokens = feeds["tokens"]
                 batch, length = tokens.shape
+                self.batches.append((length, batch))
+                test.assertLessEqual(batch, 5)
+                if encoder_input:
+                    test.assertEqual(feeds["encoder_out"].shape, (3, batch, 512))
+                else:
+                    test.assertNotIn("encoder_out", feeds)
                 test.assertEqual(feeds["encoder_padding_mask"].shape, (batch, 3))
                 for name in cross:
                     test.assertEqual(feeds[name].shape, (batch, 4, 3, 192))
-                past = feeds["past_0_key"]
-                test.assertEqual(past.shape, (batch, 4, length - 1, 192))
-                if length > 1:
-                    np.testing.assert_array_equal(past[:, 0, -1, 0], tokens[:, -2])
+                for cache_index, (index, kind) in enumerate(names):
+                    past = feeds[f"past_{index}_{kind}"]
+                    test.assertEqual(past.shape, (batch, 4, length - 1, 192))
+                    if length > 1:
+                        np.testing.assert_array_equal(past[:, 0, :, 0], tokens[:, :-1] + cache_index)
                 logits = np.full((batch, 1000), -1000, dtype=np.float32)
                 if length == 1:
                     logits[:, 1:3] = 100  # PAD and initial EOS must not be selected.
-                    logits[:, 7:12] = [5, 4.9, 4.8, 4.7, 4.6] if scenario == "reorder" else 5
+                    if scenario == "global50":
+                        logits[:, 7:57] = 5
+                    else:
+                        logits[:, 7:12] = [5, 4.9, 4.8, 4.7, 4.6] if scenario == "reorder" else 5
                 elif scenario == "unfinished":
                     logits[:, 30:40] = 0
                 elif length == 2 and scenario == "reorder":
                     for row, prefix in enumerate(tokens):
                         if prefix[-1] == 11:
+                            logits[row, 30] = 20
+                        else:
+                            logits[row, 40:42] = 0
+                elif length == 2 and scenario == "global50":
+                    for row, prefix in enumerate(tokens):
+                        if prefix[-1] == 56:
                             logits[row, 30] = 20
                         else:
                             logits[row, 40:42] = 0
@@ -179,11 +205,14 @@ class BeamDecodeTest(unittest.TestCase):
                     logits[tokens[:, -1] == 7, 30] = 1
                 else:
                     logits[:, 2] = 20
-                present = np.zeros((batch, 4, length, 192), dtype=np.float32)
-                if length > 1:
-                    present[:, :, :-1, :] = past
-                present[:, :, -1, :] = tokens[:, -1, None, None]
-                return [logits, *(present.copy() for _ in names)]
+                presents = []
+                for cache_index, (index, kind) in enumerate(names):
+                    present = np.zeros((batch, 4, length, 192), dtype=np.float32)
+                    if length > 1:
+                        present[:, :, :-1, :] = feeds[f"past_{index}_{kind}"]
+                    present[:, :, -1, :] = tokens[:, -1, None, None] + cache_index
+                    presents.append(present)
+                return [logits, *presents]
 
         return FakeSession()
 
@@ -191,8 +220,24 @@ class BeamDecodeTest(unittest.TestCase):
         tokens = benchmark_flare.beam_decode(self.session("reorder"), self.encoded, self.mask, self.cross)
         self.assertEqual(tokens, [2, 11, 30, 2])
 
+    def test_beam50_selects_and_finalizes_globally_across_five_row_chunks(self):
+        session = self.session("global50")
+        tokens = benchmark_flare.beam_decode(session, self.encoded, self.mask, self.cross, beam_size=50)
+        self.assertEqual(tokens, [2, 56, 30, 2])
+        self.assertEqual(session.batches, [(1, 1)] + [(2, 5)] * 10 + [(3, 5)] * 10)
+
+    def test_beam_rejects_noninteger_or_unsupported_widths(self):
+        for size in (4, 5.0, True, None):
+            with self.subTest(size=size), self.assertRaisesRegex(ValueError, "Beam size"):
+                benchmark_flare.beam_decode(self.session("tie"), self.encoded, self.mask, self.cross, size)
+
     def test_equal_scores_use_stable_flat_index_order(self):
         tokens = benchmark_flare.beam_decode(self.session("tie"), self.encoded, self.mask, self.cross)
+        self.assertEqual(tokens, [2, 7, 2])
+
+    def test_decoder_with_encoder_input_uses_matching_batch(self):
+        tokens = benchmark_flare.beam_decode(self.session("tie", encoder_input=True),
+                                             self.encoded, self.mask, self.cross)
         self.assertEqual(tokens, [2, 7, 2])
 
     def test_finalized_scores_are_normalized_by_generated_length(self):
@@ -228,7 +273,7 @@ class BeamDecodeTest(unittest.TestCase):
                 "license": "CC-BY-NC-4.0", "maxFrames": 200, "maxPrefix": 128,
                 "featureSize": 512, "vocabularySize": 1000, "eosId": 2, "padId": 1,
                 "inputSize": 96, "cropSize": 88, "mean": 0.421, "std": 0.165,
-                "decoderMode": "beam", "beamSize": 5, "cacheLayers": 6, "cacheHeads": 4,
+                "decoderMode": "beam", "beamSize": 50, "cacheLayers": 6, "cacheHeads": 4,
                 "cacheHeadDim": 192, "files": [],
             }
             for name, key in (("encoder.onnx", "encoder"), ("cross.onnx", "cross"),
@@ -243,7 +288,7 @@ class BeamDecodeTest(unittest.TestCase):
             sample = root / "sample.npz"
             frames = np.zeros((3, 96, 96), dtype=np.uint8)
             np.savez(sample, face=frames, lip=frames)
-            beam = self.session("tie")
+            beam = self.session("global50")
             cross = self.cross
             encoded, mask = self.encoded, self.mask
 
@@ -265,9 +310,10 @@ class BeamDecodeTest(unittest.TestCase):
             with patch.object(ort, "InferenceSession", side_effect=lambda path, *args, **kwargs: graphs[Path(path).name]):
                 summary = benchmark_flare.run(model, sample, root / "fixture")
                 self.assertIn("beamDecoderMs", summary)
+                self.assertEqual(summary["beamSize"], 50)
                 self.assertNotIn("cachedDecoderMs", summary)
                 manifest = json.loads((root / "fixture" / "manifest.json").read_text(encoding="utf-8"))
-                self.assertEqual(manifest["expectedTokenIds"], [2, 7, 2])
+                self.assertEqual(manifest["expectedTokenIds"], [2, 56, 30, 2])
                 metadata["files"][2]["name"] = "decoder-cache.onnx"
                 metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "Graph file list"):
@@ -279,10 +325,11 @@ class BeamDecodeTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Unsupported FLARE decoder mode"):
                     benchmark_flare.run(model, sample, root / "bad-fixture")
                 metadata["decoderMode"] = "beam"
-                metadata["beamSize"] = 4
-                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-                with self.assertRaisesRegex(ValueError, "Unsupported FLARE beam size"):
-                    benchmark_flare.run(model, sample, root / "bad-fixture")
+                for size in (4, 5.0, True):
+                    metadata["beamSize"] = size
+                    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+                    with self.subTest(size=size), self.assertRaisesRegex(ValueError, "Unsupported FLARE beam size"):
+                        benchmark_flare.run(model, sample, root / "bad-fixture")
         finally:
             root = Path(temporary)
             for name in ("face.f32", "lip.f32", "manifest.json", "results.json"):

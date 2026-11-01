@@ -77,11 +77,13 @@ def cached_greedy_decode(
 
 def beam_decode(
     session: ort.InferenceSession, encoded: np.ndarray, mask: np.ndarray,
-    cross_values: dict[str, np.ndarray],
+    cross_values: dict[str, np.ndarray], beam_size: int = 5,
 ) -> list[int]:
-    """Run the single-sample, beam-5 incremental search used by the export."""
+    """Run a global single-sample beam search in native batches of at most five."""
     import numpy as np
 
+    if type(beam_size) is not int or beam_size not in (5, 50):
+        raise ValueError("Beam size must be 5 or 50")
     names = [(i, kind) for i in range(CACHE_LAYERS) for kind in ("key", "value")]
     past_names = [f"past_{i}_{kind}" for i, kind in names]
     present_names = [f"present_{i}_{kind}" for i, kind in names]
@@ -100,60 +102,76 @@ def beam_decode(
                    or value.dtype != np.float32 or not np.isfinite(value).all() for value in cross_values.values())):
         raise ValueError("Invalid or non-finite encoder or cross cache output")
 
+    cross_batches = {1: cross_values, 5: {name: np.repeat(value, 5, axis=0)
+                                           for name, value in cross_values.items()}}
+    masks = {1: mask, 5: np.repeat(mask, 5, axis=0)}
+    encoded_batches = ({1: encoded, 5: np.repeat(encoded, 5, axis=1)}
+                       if "encoder_out" in input_names else {})
     tokens = np.array([[2]], dtype=np.int64)
     cumulative = np.zeros(1, dtype=np.float32)
     cache = {name: np.zeros((1, CACHE_HEADS, 0, CACHE_HEAD_DIM), dtype=np.float32)
              for name in past_names}
     finalized: list[tuple[float, list[int]]] = []
-    ignored = np.zeros(5, dtype=bool)
+    ignored = np.zeros(beam_size, dtype=bool)
     for step in range(128):
         batch, length = tokens.shape
-        candidates = {"tokens": tokens, "encoder_out": np.repeat(encoded, batch, axis=1),
-                      "encoder_padding_mask": np.repeat(mask, batch, axis=0), **cache,
-                      **{name: np.repeat(value, batch, axis=0) for name, value in cross_values.items()}}
-        values = session.run(["next_logits", *present_names],
-                             {name: candidates[name] for name in input_names})
-        if len(values) != 1 + len(present_names):
-            raise ValueError("Invalid beam decoder output count")
-        logits = values[0]
-        if logits.shape != (batch, 1000) or logits.dtype != np.float32 or not np.isfinite(logits).all():
-            raise ValueError("Invalid or non-finite beam decoder output")
-        expected_shape = (batch, CACHE_HEADS, length, CACHE_HEAD_DIM)
-        if any(value.shape != expected_shape or value.dtype != np.float32 or not np.isfinite(value).all()
-               for value in values[1:]):
-            raise ValueError("Invalid or non-finite self cache output")
-        present = dict(zip(past_names, values[1:]))
+        logits = np.empty((batch, 1000), dtype=np.float32)
+        present = {name: np.empty((batch, CACHE_HEADS, length, CACHE_HEAD_DIM), dtype=np.float32)
+                   for name in past_names}
+        for start in range(0, batch, 5):
+            end = min(start + 5, batch)
+            chunk = end - start
+            feeds = {"tokens": tokens[start:end], "encoder_padding_mask": masks[chunk],
+                     **{name: value[start:end] for name, value in cache.items()}, **cross_batches[chunk]}
+            if encoded_batches:
+                feeds["encoder_out"] = encoded_batches[chunk]
+            values = session.run(["next_logits", *present_names], feeds)
+            if len(values) != 1 + len(present_names):
+                raise ValueError("Invalid beam decoder output count")
+            if values[0].shape != (chunk, 1000) or values[0].dtype != np.float32 or not np.isfinite(values[0]).all():
+                raise ValueError("Invalid or non-finite beam decoder output")
+            expected_shape = (chunk, CACHE_HEADS, length, CACHE_HEAD_DIM)
+            if any(value.shape != expected_shape or value.dtype != np.float32 or not np.isfinite(value).all()
+                   for value in values[1:]):
+                raise ValueError("Invalid or non-finite self cache output")
+            logits[start:end] = values[0]
+            for name, value in zip(past_names, values[1:]):
+                present[name][start:end] = value
+            del value, values, feeds
+        # Every old row has been consumed; do not retain it while reordering the new cache.
+        cache.clear()
         shifted = logits - np.max(logits, axis=1, keepdims=True)
         lprobs = shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))
         lprobs[:, 1] = -np.inf
         if step == 0:
             lprobs[:, 2] = -np.inf
         scores = (lprobs + cumulative[:, None]).reshape(-1)
-        order = np.argsort(-scores, kind="stable")[:10]
+        order = np.argsort(-scores, kind="stable")[:2 * beam_size]
         top_scores = scores[order]
         parents, words = order // 1000, order % 1000
         eos_mask = (words == 2) & np.isfinite(top_scores)
         if step:
-            eos_mask[:5] &= ~ignored
-        for index in range(5):
-            if eos_mask[index] and len(finalized) < 5:
+            eos_mask[:beam_size] &= ~ignored
+        for index in range(beam_size):
+            if eos_mask[index] and len(finalized) < beam_size:
                 finalized.append((float(top_scores[index] / np.float32(step + 1)),
                                   tokens[parents[index]].tolist() + [2]))
-        if len(finalized) == 5:
+        if len(finalized) == beam_size:
             finalized.sort(key=lambda item: item[0], reverse=True)
             return finalized[0][1]
         active_mask = eos_mask.copy()
         if step:
-            active_mask[:5] |= ignored
-        ranks = np.arange(10) + active_mask.astype(np.int64) * 10
-        selected = np.argsort(ranks)[:5]
-        ignored = ranks[selected] >= 10
+            active_mask[:beam_size] |= ignored
+        ranks = np.arange(2 * beam_size) + active_mask.astype(np.int64) * (2 * beam_size)
+        selected = np.argsort(ranks)[:beam_size]
+        ignored = ranks[selected] >= 2 * beam_size
         if ignored.all():
             raise ValueError("All active beam candidates were ignored")
         parents = parents[selected]
         tokens = np.concatenate((tokens[parents], words[selected, None]), axis=1)
         cumulative = top_scores[selected]
         cache = {name: value[parents] for name, value in present.items()}
+        del present
     raise ValueError("Beam reached 128 prefixes without natural finalization")
 
 
@@ -206,7 +224,7 @@ def run(model_dir: Path, sample: Path, output: Path) -> dict:
         "cacheLayers": CACHE_LAYERS, "cacheHeads": CACHE_HEADS, "cacheHeadDim": CACHE_HEAD_DIM,
     }.items()):
         raise ValueError("Unsupported FLARE cache geometry")
-    if mode == "beam" and (type(metadata.get("beamSize")) is not int or metadata["beamSize"] != 5):
+    if mode == "beam" and (type(metadata.get("beamSize")) is not int or metadata["beamSize"] not in (5, 50)):
         raise ValueError("Unsupported FLARE beam size")
     graph_specs = [("encoder", "encoder.onnx", "encoder")]
     if mode == "full":
@@ -285,8 +303,10 @@ def run(model_dir: Path, sample: Path, output: Path) -> dict:
             raise ValueError("Invalid or non-finite cross cache output")
         started = time.perf_counter()
         if mode == "beam":
-            tokens = beam_decode(sessions["beamDecoder"], encoded, mask, dict(zip(cross_names, values)))
+            tokens = beam_decode(sessions["beamDecoder"], encoded, mask, dict(zip(cross_names, values)),
+                                 metadata["beamSize"])
             summary["beamDecoderMs"] = (time.perf_counter() - started) * 1000
+            summary["beamSize"] = metadata["beamSize"]
         else:
             tokens = cached_greedy_decode(sessions["cachedDecoder"], encoded, mask, dict(zip(cross_names, values)))
             summary["cachedDecoderMs"] = (time.perf_counter() - started) * 1000

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack a trusted beam-5 FLARE export using FP16 storage and FLOAT casts.
+"""Pack a trusted beam FLARE export using FP16 storage and FLOAT casts.
 
 FP16 rounding can change recognition. ONNX Runtime may fold casts back to
 FP32, so neither lower runtime memory nor faster computation is implied. These
@@ -31,7 +31,7 @@ def validate_source(directory: Path, metadata: dict[str, Any]) -> dict[str, Path
         "schemaVersion": 1, "modelId": MODEL_ID, "releaseYear": 2026,
         "license": "CC-BY-NC-4.0", "sourceCheckpointRepository": "Anony94/FLARE-checkpoints",
         "sourceCheckpointRevision": CHECKPOINT_REVISION, "sourceCheckpointArtifact": CHECKPOINT_ARTIFACT,
-        "sourceCheckpointSha256": CHECKPOINT_SHA256, "decoderMode": "beam", "beamSize": 5,
+        "sourceCheckpointSha256": CHECKPOINT_SHA256, "decoderMode": "beam",
         "cacheLayers": CACHE_LAYERS, "cacheHeads": CACHE_HEADS, "cacheHeadDim": CACHE_HEAD_DIM,
         "fps": 25, "inputSize": 96, "cropSize": 88, "mean": 0.421, "std": 0.165,
         "inputGeometry": [96, 96], "crop": [4, 92, 4, 92], "cropGeometry": [88, 88],
@@ -42,6 +42,8 @@ def validate_source(directory: Path, metadata: dict[str, Any]) -> dict[str, Path
     if any(metadata.get(key) != value or type(metadata.get(key)) is not type(value)
            for key, value in required.items()):
         raise ValueError("Unsupported model, normalization, cache, or provenance metadata")
+    if type(metadata.get("beamSize")) is not int or metadata["beamSize"] not in (5, 50):
+        raise ValueError("Unsupported beam size metadata")
     symbols = metadata.get("symbols")
     if not isinstance(symbols, list) or len(symbols) != 1000 or not all(isinstance(s, str) for s in symbols):
         raise ValueError("Invalid vocabulary")
@@ -193,7 +195,7 @@ def pack(model_dir: Path, output: Path) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-dir", type=Path, required=True, help="Trusted beam-5 export directory.")
+    parser.add_argument("--model-dir", type=Path, required=True, help="Trusted beam export directory.")
     parser.add_argument("--output", type=Path, required=True, help="New directory outside any Git working tree.")
     parser.add_argument("--accept-license", action="store_true", required=True, help="Accept CC-BY-NC-4.0 model terms.")
     args = parser.parse_args(argv)
