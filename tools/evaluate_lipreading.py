@@ -491,6 +491,7 @@ def run_ctc(
     mobile_model_dir: Path,
     beam_size: int = 1,
     token_top_k: int = 20,
+    activity_gate: str = "legacy",
 ) -> tuple[list[tuple[dict, ManifestItem]], dict]:
     """Host CTC export benchmark over every window (no window dropped)."""
     tools_dir = str(Path(__file__).resolve().parent)
@@ -533,7 +534,7 @@ def run_ctc(
         clip_abs = manifest_dir / item.clipDir
         wall_start = time.perf_counter()
         raw, error, duration_ms, inference_ms = _predict_ctc_clip(
-            inference, decode_logits, np, session, tokens, clip_abs
+            inference, decode_logits, np, session, tokens, clip_abs, activity_gate=activity_gate
         )
         wall_ms = int((time.perf_counter() - wall_start) * 1000)
         scored.append(
@@ -548,7 +549,7 @@ def run_ctc(
 
 
 def _predict_ctc_clip(
-    inference, greedy_decode, np, session, tokens, clip_abs: Path
+    inference, decode_logits, np, session, tokens, clip_abs: Path, *, activity_gate: str = "legacy"
 ) -> tuple[str, str | None, int | None, int | None]:
     """Decode every <=8s window; empty/no-speech windows add no text."""
     try:
@@ -574,7 +575,17 @@ def _predict_ctc_clip(
         rois = inference.align_mouths(frames, landmarks)
         if rois is None:
             continue
-        span = inference.speech_span(inference.mouth_motion(rois, fps), fps)
+        motion = inference.mouth_motion(rois, fps)
+        if activity_gate == "ctc-evidence":
+            from activity_gate import (CANDIDATE_MOTION, STRONG_MOTION, admits,
+                                       greedy_evidence, span as activity_span)
+
+            strong = activity_span(motion, fps, STRONG_MOTION)
+            span = activity_span(motion, fps, CANDIDATE_MOTION)
+        elif activity_gate == "legacy":
+            span = inference.speech_span(motion, fps)
+        else:
+            raise ValueError(f"Unsupported activity gate: {activity_gate}")
         if span is None:
             continue
         start, stop = int(span[0]), int(span[1])
@@ -586,7 +597,13 @@ def _predict_ctc_clip(
         started = time.perf_counter()
         logits = session.run(["logits"], feed)[0]
         inference_ms += int((time.perf_counter() - started) * 1000)
-        text = greedy_decode(logits, tokens)
+        if not np.isfinite(logits).all():
+            return "", "recognition-failed: non-finite CTC output", duration_ms, inference_ms
+        if activity_gate == "ctc-evidence":
+            evidence = greedy_evidence(logits, tokens)
+            if strong is None and not admits(evidence):
+                continue
+        text = decode_logits(logits, tokens)
         if text:
             raws.append(text)
     if not raws:
@@ -613,12 +630,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ctc-beam-size", type=int, default=1,
                         help="1 is the production greedy baseline; >1 enables experimental prefix search.")
     parser.add_argument("--ctc-token-top-k", type=int, default=20)
+    parser.add_argument("--activity-gate", choices=("legacy", "ctc-evidence"), default=None,
+                        help="CTC activity gate (default: legacy).")
     parser.add_argument("--score-predictions", type=Path, default=None)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.activity_gate is not None and (args.decoder == "desktop" or args.score_predictions is not None):
+        print("error: --activity-gate requires CTC inference", file=sys.stderr)
+        return 2
+    if args.activity_gate == "ctc-evidence" and args.motion_threshold != 8.0:
+        print("error: ctc-evidence uses fixed motion thresholds 8 and 4", file=sys.stderr)
+        return 2
     if args.beam_size is None or int(args.beam_size) < 1:
         print("error: --beam-size must be a positive integer", file=sys.stderr)
         return 2
@@ -723,8 +748,18 @@ def main(argv: list[str] | None = None) -> int:
                 mobile_model_dir=args.mobile_model_dir,
                 beam_size=args.ctc_beam_size,
                 token_top_k=args.ctc_token_top_k,
+                activity_gate=args.activity_gate or "legacy",
             )
             model_info["motionThreshold"] = args.motion_threshold
+            model_info["activityGate"] = args.activity_gate or "legacy"
+            if args.activity_gate == "ctc-evidence":
+                from activity_gate import (CANDIDATE_MOTION, MIN_EMISSIONS, MIN_MEAN_PROBABILITY,
+                                           MIN_MOVING_SECONDS, PADDING_SECONDS, STRONG_MOTION)
+                model_info["activityGateThresholds"] = {
+                    "strongMotion": STRONG_MOTION, "candidateMotion": CANDIDATE_MOTION,
+                    "minMovingSeconds": MIN_MOVING_SECONDS, "paddingSeconds": PADDING_SECONDS,
+                    "minEmissions": MIN_EMISSIONS, "minMeanProbability": MIN_MEAN_PROBABILITY,
+                }
             results = finalize_results(
                 dataset_id=manifest.datasetId,
                 manifest_sha256=manifest.sha256,
