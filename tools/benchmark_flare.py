@@ -75,6 +75,88 @@ def cached_greedy_decode(
     raise ValueError("Decoder did not generate EOS within 128 iterations")
 
 
+def beam_decode(
+    session: ort.InferenceSession, encoded: np.ndarray, mask: np.ndarray,
+    cross_values: dict[str, np.ndarray],
+) -> list[int]:
+    """Run the single-sample, beam-5 incremental search used by the export."""
+    import numpy as np
+
+    names = [(i, kind) for i in range(CACHE_LAYERS) for kind in ("key", "value")]
+    past_names = [f"past_{i}_{kind}" for i, kind in names]
+    present_names = [f"present_{i}_{kind}" for i, kind in names]
+    cross_names = [f"cross_{i}_{kind}" for i, kind in names]
+    if set(cross_values) != set(cross_names):
+        raise ValueError("Invalid cross cache names")
+    input_names = {node.name for node in session.get_inputs()}
+    required = {"tokens", "encoder_padding_mask", *past_names, *cross_names}
+    if input_names not in (required, required | {"encoder_out"}):
+        raise ValueError("Unsupported beam decoder inputs")
+    frames = encoded.shape[0] if encoded.ndim == 3 else 0
+    if (not 1 <= frames <= 200 or encoded.shape != (frames, 1, 512)
+            or encoded.dtype != np.float32 or mask.shape != (1, frames) or mask.dtype != np.bool_
+            or not np.isfinite(encoded).all()
+            or any(value.shape != (1, CACHE_HEADS, frames, CACHE_HEAD_DIM)
+                   or value.dtype != np.float32 or not np.isfinite(value).all() for value in cross_values.values())):
+        raise ValueError("Invalid or non-finite encoder or cross cache output")
+
+    tokens = np.array([[2]], dtype=np.int64)
+    cumulative = np.zeros(1, dtype=np.float32)
+    cache = {name: np.zeros((1, CACHE_HEADS, 0, CACHE_HEAD_DIM), dtype=np.float32)
+             for name in past_names}
+    finalized: list[tuple[float, list[int]]] = []
+    ignored = np.zeros(5, dtype=bool)
+    for step in range(128):
+        batch, length = tokens.shape
+        candidates = {"tokens": tokens, "encoder_out": np.repeat(encoded, batch, axis=1),
+                      "encoder_padding_mask": np.repeat(mask, batch, axis=0), **cache,
+                      **{name: np.repeat(value, batch, axis=0) for name, value in cross_values.items()}}
+        values = session.run(["next_logits", *present_names],
+                             {name: candidates[name] for name in input_names})
+        if len(values) != 1 + len(present_names):
+            raise ValueError("Invalid beam decoder output count")
+        logits = values[0]
+        if logits.shape != (batch, 1000) or logits.dtype != np.float32 or not np.isfinite(logits).all():
+            raise ValueError("Invalid or non-finite beam decoder output")
+        expected_shape = (batch, CACHE_HEADS, length, CACHE_HEAD_DIM)
+        if any(value.shape != expected_shape or value.dtype != np.float32 or not np.isfinite(value).all()
+               for value in values[1:]):
+            raise ValueError("Invalid or non-finite self cache output")
+        present = dict(zip(past_names, values[1:]))
+        shifted = logits - np.max(logits, axis=1, keepdims=True)
+        lprobs = shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))
+        lprobs[:, 1] = -np.inf
+        if step == 0:
+            lprobs[:, 2] = -np.inf
+        scores = (lprobs + cumulative[:, None]).reshape(-1)
+        order = np.argsort(-scores, kind="stable")[:10]
+        top_scores = scores[order]
+        parents, words = order // 1000, order % 1000
+        eos_mask = (words == 2) & np.isfinite(top_scores)
+        if step:
+            eos_mask[:5] &= ~ignored
+        for index in range(5):
+            if eos_mask[index] and len(finalized) < 5:
+                finalized.append((float(top_scores[index] / np.float32(step + 1)),
+                                  tokens[parents[index]].tolist() + [2]))
+        if len(finalized) == 5:
+            finalized.sort(key=lambda item: item[0], reverse=True)
+            return finalized[0][1]
+        active_mask = eos_mask.copy()
+        if step:
+            active_mask[:5] |= ignored
+        ranks = np.arange(10) + active_mask.astype(np.int64) * 10
+        selected = np.argsort(ranks)[:5]
+        ignored = ranks[selected] >= 10
+        if ignored.all():
+            raise ValueError("All active beam candidates were ignored")
+        parents = parents[selected]
+        tokens = np.concatenate((tokens[parents], words[selected, None]), axis=1)
+        cumulative = top_scores[selected]
+        cache = {name: value[parents] for name, value in present.items()}
+    raise ValueError("Beam reached 128 prefixes without natural finalization")
+
+
 def greedy_decode(
     session: ort.InferenceSession, encoded: np.ndarray, mask: np.ndarray,
 ) -> list[int]:
@@ -107,6 +189,8 @@ def run(model_dir: Path, sample: Path, output: Path) -> dict:
     if output.exists():
         raise ValueError("Refusing to overwrite an existing fixture directory")
     metadata = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
+    if not isinstance(metadata, dict):
+        raise ValueError("Unsupported FLARE export metadata")
     required = {
         "schemaVersion": 1, "modelId": MODEL_ID, "releaseYear": 2026,
         "license": "CC-BY-NC-4.0", "maxFrames": 200, "maxPrefix": 128,
@@ -116,21 +200,30 @@ def run(model_dir: Path, sample: Path, output: Path) -> dict:
     if any(metadata.get(key) != value for key, value in required.items()):
         raise ValueError("Unsupported FLARE export metadata")
     mode = metadata.get("decoderMode", "full")
-    if mode not in ("full", "cached"):
+    if mode not in ("full", "cached", "beam"):
         raise ValueError("Unsupported FLARE decoder mode")
-    if mode == "cached" and any(metadata.get(key) != value for key, value in {
+    if mode in ("cached", "beam") and any(metadata.get(key) != value for key, value in {
         "cacheLayers": CACHE_LAYERS, "cacheHeads": CACHE_HEADS, "cacheHeadDim": CACHE_HEAD_DIM,
     }.items()):
         raise ValueError("Unsupported FLARE cache geometry")
+    if mode == "beam" and (type(metadata.get("beamSize")) is not int or metadata["beamSize"] != 5):
+        raise ValueError("Unsupported FLARE beam size")
     graph_specs = [("encoder", "encoder.onnx", "encoder")]
-    graph_specs += ([("decoder", "decoder.onnx", "decoder")] if mode == "full" else [
-        ("cross", "cross.onnx", "cross"), ("cachedDecoder", "decoder-cache.onnx", "cachedDecoder")])
+    if mode == "full":
+        graph_specs.append(("decoder", "decoder.onnx", "decoder"))
+    else:
+        graph_specs.append(("cross", "cross.onnx", "cross"))
+        graph_specs.append(("beamDecoder", "decoder-beam.onnx", "beamDecoder") if mode == "beam" else
+                           ("cachedDecoder", "decoder-cache.onnx", "cachedDecoder"))
     entries = metadata.get("files")
     if not isinstance(entries, list) or len(entries) != len(graph_specs):
         raise ValueError("Invalid graph file list")
     for _, filename, key in graph_specs:
         matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("name") == filename]
-        if (len(matches) != 1 or matches[0].get("sizeBytes") != metadata.get(f"{key}Bytes")
+        size, digest = metadata.get(f"{key}Bytes"), metadata.get(f"{key}Sha256")
+        if (type(size) is not int or size <= 0 or not isinstance(digest, str)
+                or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest)
+                or len(matches) != 1 or matches[0].get("sizeBytes") != size
                 or matches[0].get("sha256") != metadata.get(f"{key}Sha256")):
             raise ValueError("Graph file list does not match metadata")
     graphs = {name: checked_graph(model_dir, key, metadata, filename)
@@ -154,6 +247,14 @@ def run(model_dir: Path, sample: Path, output: Path) -> dict:
         started = time.perf_counter()
         sessions[kind] = ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
         load_ms[kind] = (time.perf_counter() - started) * 1000
+    expected_inputs = {
+        "encoder": {"face", "lip", "face_mask", "lip_mask", "padding_mask"},
+        "decoder": {"tokens", "encoder_out", "encoder_padding_mask"},
+        "cross": {"encoder_out"},
+    }
+    for kind, expected in expected_inputs.items():
+        if kind in sessions and {node.name for node in sessions[kind].get_inputs()} != expected:
+            raise ValueError(f"Unsupported {kind} graph inputs")
     started = time.perf_counter()
     encoded, mask = sessions["encoder"].run(["encoder_out", "encoder_padding_mask"], {
         "face": face[None, None], "lip": lip[None, None],
@@ -183,8 +284,12 @@ def run(model_dir: Path, sample: Path, output: Path) -> dict:
                 value.shape != expected_shape or not np.isfinite(value).all() for value in values)):
             raise ValueError("Invalid or non-finite cross cache output")
         started = time.perf_counter()
-        tokens = cached_greedy_decode(sessions["cachedDecoder"], encoded, mask, dict(zip(cross_names, values)))
-        summary["cachedDecoderMs"] = (time.perf_counter() - started) * 1000
+        if mode == "beam":
+            tokens = beam_decode(sessions["beamDecoder"], encoded, mask, dict(zip(cross_names, values)))
+            summary["beamDecoderMs"] = (time.perf_counter() - started) * 1000
+        else:
+            tokens = cached_greedy_decode(sessions["cachedDecoder"], encoded, mask, dict(zip(cross_names, values)))
+            summary["cachedDecoderMs"] = (time.perf_counter() - started) * 1000
     summary["generatedTokenCount"] = len(tokens) - 1
     write_fixture(output, face, lip, metadata, tokens, summary)
     return summary

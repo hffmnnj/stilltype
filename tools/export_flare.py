@@ -24,7 +24,7 @@ CHECKPOINT_SIZE = 2_126_211_579
 CHECKPOINT_SHA256 = "fe8c8ecab633bd4e3e490924e2bc917420b4d18d7309a5cd612902ccc842853b"
 CHECKPOINT_REVISION = "6187ad650dc1786a8efc8b6bfbee37bbf62c4b2e"
 CHECKPOINT_ARTIFACT = "exp_22_base/finetuned/checkpoints/checkpoint_last.pt"
-GRAPH_NAMES = ("encoder.onnx", "decoder.onnx", "cross.onnx", "decoder-cache.onnx")
+GRAPH_NAMES = ("encoder.onnx", "decoder.onnx", "cross.onnx", "decoder-cache.onnx", "decoder-beam.onnx")
 CACHE_LAYERS, CACHE_HEADS, CACHE_HEAD_DIM = 6, 4, 192
 
 
@@ -77,8 +77,8 @@ def load_sample(path: Path) -> tuple[Any, Any]:
 
 def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, device: str,
            decoder_mode: str = "full") -> dict[str, Any]:
-    if decoder_mode not in ("full", "cached"):
-        raise ValueError("decoder mode must be full or cached")
+    if decoder_mode not in ("full", "cached", "beam"):
+        raise ValueError("decoder mode must be full, cached, or beam")
     output = validate_output(output)
     if not (source / "flare" / "__init__.py").is_file():
         raise ValueError("source must be a trusted FLARE checkout containing flare/__init__.py")
@@ -219,7 +219,7 @@ def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, devi
         raise ValueError(f"expected 1000 dictionary symbols, got {len(symbols)}")
     encoder = VisualEncoder(model.encoder).eval()
     decoder = Decoder(model.decoder).eval()
-    if decoder_mode == "cached":
+    if decoder_mode in ("cached", "beam"):
         if type(model.decoder.embed_positions).__name__ != "SinusoidalPositionalEmbedding":
             raise ValueError("expected the inspected sinusoidal positional embedding")
         if len(model.decoder.layers) != CACHE_LAYERS or any(
@@ -236,7 +236,7 @@ def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, devi
     output.mkdir(parents=True, exist_ok=True)
     # Reserve all names exclusively before export; existing artifacts are never overwritten.
     graph_names = ("encoder.onnx", "decoder.onnx") if decoder_mode == "full" else (
-        "encoder.onnx", "cross.onnx", "decoder-cache.onnx")
+        "encoder.onnx", "cross.onnx", "decoder-beam.onnx" if decoder_mode == "beam" else "decoder-cache.onnx")
     for name in (*graph_names, "metadata.json"):
         with (output / name).open("xb"):
             pass
@@ -274,18 +274,30 @@ def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, devi
                 opset_version=17, dynamo=False,
             )
             cross_values = cross(encoded)
-            past = tuple(torch.zeros((1, CACHE_HEADS, 2, CACHE_HEAD_DIM), device=device,
+            batch = 2 if decoder_mode == "beam" else 1
+            past = tuple(torch.zeros((batch, CACHE_HEADS, 2, CACHE_HEAD_DIM), device=device,
                                      dtype=encoded.dtype) for _ in past_names)
+            axes = {"tokens": {1: "prefix"}, "encoder_out": {0: "encoded_frames"},
+                    "encoder_padding_mask": {1: "encoded_frames"},
+                    **{name: {2: "past"} for name in past_names},
+                    **{name: {2: "encoded_frames"} for name in cross_names},
+                    **{name: {2: "present"} for name in present_names}}
+            if decoder_mode == "beam":
+                for name in ("tokens", "encoder_padding_mask", "next_logits", *past_names, *cross_names, *present_names):
+                    axes.setdefault(name, {})[0] = "batch"
+                axes["encoder_out"][1] = "batch"
+                prefix = prefix.repeat(batch, 1)
+                decoder_encoded = encoded.repeat(1, batch, 1)
+                decoder_mask = encoded_mask.repeat(batch, 1)
+                cross_values = tuple(value.repeat(batch, 1, 1, 1) for value in cross_values)
+            else:
+                decoder_encoded, decoder_mask = encoded, encoded_mask
             torch.onnx.export(
-                cached, (prefix, encoded, encoded_mask, *past, *cross_values),
-                str(output / "decoder-cache.onnx"),
+                cached, (prefix, decoder_encoded, decoder_mask, *past, *cross_values),
+                str(output / graph_names[2]),
                 input_names=["tokens", "encoder_out", "encoder_padding_mask", *past_names, *cross_names],
                 output_names=["next_logits", *present_names],
-                dynamic_axes={"tokens": {1: "prefix"}, "encoder_out": {0: "encoded_frames"},
-                              "encoder_padding_mask": {1: "encoded_frames"},
-                              **{name: {2: "past"} for name in past_names},
-                              **{name: {2: "encoded_frames"} for name in cross_names},
-                              **{name: {2: "present"} for name in present_names}},
+                dynamic_axes=axes,
                 opset_version=17, dynamo=False,
             )
 
@@ -309,10 +321,15 @@ def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, devi
     if decoder_mode == "full":
         metadata.update(decoderBytes=files[1]["sizeBytes"], decoderSha256=files[1]["sha256"])
     else:
-        metadata.update(decoderMode="cached", cacheLayers=CACHE_LAYERS, cacheHeads=CACHE_HEADS,
-                        cacheHeadDim=CACHE_HEAD_DIM, crossBytes=files[1]["sizeBytes"],
-                        crossSha256=files[1]["sha256"], cachedDecoderBytes=files[2]["sizeBytes"],
-                        cachedDecoderSha256=files[2]["sha256"])
+        metadata.update(decoderMode=decoder_mode, cacheLayers=CACHE_LAYERS, cacheHeads=CACHE_HEADS,
+                         cacheHeadDim=CACHE_HEAD_DIM, crossBytes=files[1]["sizeBytes"],
+                         crossSha256=files[1]["sha256"])
+        if decoder_mode == "beam":
+            metadata.update(beamSize=5, beamDecoderBytes=files[2]["sizeBytes"],
+                            beamDecoderSha256=files[2]["sha256"])
+        else:
+            metadata.update(cachedDecoderBytes=files[2]["sizeBytes"],
+                            cachedDecoderSha256=files[2]["sha256"])
     (output / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"output": str(output), "device": device, "files": files, "metadata": "metadata.json"}
 
@@ -324,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sample", type=Path, required=True, help="Reference-free NPZ with face and lip uint8 [T,96,96].")
     parser.add_argument("--output", type=Path, required=True, help="Output directory outside the repository.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    parser.add_argument("--decoder-mode", choices=("full", "cached"), default="full")
+    parser.add_argument("--decoder-mode", choices=("full", "cached", "beam"), default="full")
     parser.add_argument("--accept-license", action="store_true", required=True, help="Accept CC-BY-NC-4.0 model terms.")
     args = parser.parse_args(argv)
     try:

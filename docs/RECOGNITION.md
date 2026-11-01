@@ -335,6 +335,81 @@ errors rose from 34/148 to 38/148, so it was not adopted. Two posterior-weighted
 development variants also failed to beat the uniform selector. This remains
 one-source exploratory evidence, not a new independent speaker population.
 
+### Two additional speakers
+
+A second natural-speech comparison used public-domain government videos of
+[Michelle Obama, May 10, 2014](https://commons.wikimedia.org/wiki/File:2014-05-10_President_Obama%27s_Weekly_Address.webm)
+and [Joe Biden, November 19, 2016](https://commons.wikimedia.org/wiki/File:2016-11-19_President_Obama%27s_Weekly_Address.webm).
+The Commons TimedText pages supplied provisional English caption text and
+timing. The text was extracted from the rendered page, not obtained as an
+original subtitle file; caption authorship and its separate licensing were
+not independently established. The pages carry CC BY-SA terms. Videos,
+caption text, pixels and hypotheses remain outside Git and are not redistributed.
+Training overlap is unknown, and the words were not independently audio-verified.
+These are spoken recordings with **video-only inference**, not silent mouthing.
+
+Before any model ran on these sources, consecutive complete caption cues were
+grouped into 3–7.8-second clips, allowing gaps of at most 250 ms. Annotations,
+groups with fewer than four normalized words, and noncanonical timestamps were
+excluded. Twelve Biden cues had ambiguous fractional timestamps; they were
+excluded rather than repaired after seeing predictions. Twenty eligible groups
+per source were sampled with Python seeds `20261104` and `20261105`. The first
+12 sampled groups per source formed the primary cohort; the remaining eight
+per source formed a disjoint locked confirmation set. Within each split,
+groups were sorted by time. Confirmation is from the same two sources, not a
+new population.
+
+The primary manifest SHA-256 is
+`d54fb03e5426d71fa3ad95cce55ec15e1c2f476d37d1caf6c17a69ecd166b7cc`;
+confirmation is
+`fcef36857009c60b8e9681ea502daba291d44351561859602299501153a842ce`.
+Inference runners received only reference-free clip IDs, ranges and pixels.
+References were opened separately for scoring after predictions were complete.
+All 40 clips prepared and decoded without a model-call failure.
+
+| System | Michelle development, 170 words | Biden test, 204 words | Locked confirmation, 258 words |
+| --- | ---: | ---: | ---: |
+| Current desktop, joint beam 5 | 34/170 = 20.00% | 67/204 = 32.84% | 67/258 = 25.97% |
+| Current Android INT8 model, host CTC-evidence path | 44/170 = 25.88% | 91/204 = 44.61% | 89/258 = 34.50% |
+| FLARE Base, native-landmark geometry, beam 50 | 20/170 = 11.76% | 47/204 = 23.04% | 40/258 = 15.50% |
+| Same visual output + optional Qwen3.5 4B Intent | 16/170 = 9.41% | 48/204 = 23.53% | 41/258 = 15.89% |
+
+Native-landmark geometry was chosen for its lower development error count
+before computing test metrics. The alternative MediaPipe geometry gave 28/170
+development errors and 42/204 test errors; its lower test score was not used to
+reverse that choice. Here, “native-landmark” means the desktop four-landmark
+alignment with centered temporal smoothing. It does **not** establish parity
+with Android's per-frame alignment or the paper's original preprocessing.
+
+The chosen raw model reduced confirmation errors by **55.06% versus the current
+Android model's host path** and **40.30% versus the desktop path**. On the Biden
+test split those reductions were 48.35% and 29.85%, respectively. These are
+provisional source-specific gains, not a measured phone improvement or the
+original GRID halving. All FLARE rows above are ungated research decodes; the
+quiet-input limitation still prevents a default switch.
+
+The unchanged 4B Intent policy received only opaque IDs, raw visual text and
+empty context. Its development score passed the predeclared test rule of at
+most 17 errors, but both held-out scores worsened by one error. One test
+correction fell back to raw text; the fallback remains scored, not discarded.
+The correction is **not adopted as a recognition improvement**. Neither the
+development-only 9.41% WER nor intent-assisted guesses establish general 90%
+accuracy. The Large visual checkpoint gave 19/170 development errors, just one
+fewer than Base; it failed the same 17-error eligibility rule and was not run
+on these test or confirmation clips.
+
+### Rejected sampling change
+
+A timestamp-aware sampler reproduced the original prepared pixels before
+changing temporal selection. FLARE's first natural-source development errors
+fell from 46/141 to 40/141 with MediaPipe geometry, but test errors rose from
+34/148 to 42/148. Combining timestamp sampling with four-landmark geometry
+raised development errors to 54/141. A separate current-INT8 development probe
+also worsened, from 83/141 to 96/141; that worker disclosed reading reference-
+bearing metadata before inference, although references were not model inputs.
+That negative probe is therefore not claimed fully blind. Production sampling
+was not changed.
+
 ## Portable FLARE research utilities
 
 `tools/export_flare.py` exports the pinned Base encoder and next-token decoder
@@ -376,8 +451,8 @@ executable code; graph hashes establish file consistency, not independent
 authenticity. The runtime fixture directory is owner-only (`0700`) because
 normalized face/lip pixels and generated token IDs can be sensitive.
 
-The graphs use batch size one, dynamic frame/prefix axes, a 512-dimensional
-encoder output and a 1,000-token vocabulary. Metadata records ordered symbols,
+The full-prefix and greedy cached paths use batch size one, dynamic frame/prefix
+axes, a 512-dimensional encoder output and a 1,000-token vocabulary. Metadata records ordered symbols,
 geometry, normalization, provenance and graph hashes. The decoder's causal mask
 is constructed dynamically; a cached trace-time mask is not valid for longer
 prefixes. Greedy decoding starts with EOS, excludes PAD and first-step EOS,
@@ -422,3 +497,32 @@ versus about 0.45 seconds for full-prefix decoding in separate prototype
 measurements. These are CPU internal-stage timings, excluding graph loads,
 camera and preprocessing. See [ANDROID.md](ANDROID.md#cached-decoder-benchmark)
 for actual native execution and its different performance envelope.
+
+### Batched beam export
+
+`--decoder-mode beam` exports `encoder.onnx`, `cross.onnx` and
+`decoder-beam.onnx`. The runtime command stays the same: metadata selects a
+fixed beam width of five. The decoder accepts dynamic beam rows, including a
+single initial row with empty self caches; the caller repeats cross projections
+and reorders self caches by each selected parent. Search uses cumulative
+float32 log probabilities, length penalty 1, stable flat-index tie ordering,
+PAD/initial-EOS exclusion and natural finalization. It fails rather than forcing
+EOS at the 128-prefix bound. This is a bounded research decoder, not an app
+model switch.
+
+The published exporter ran against the pinned checkpoint and trusted source.
+All 12 complete development sequences matched independent Torch/fairseq beam-5
+outputs on host CPU, and all 40 two-source clips decoded without failure. The
+new-cohort scores were **20/170 development, 56/204 test and 42/258 confirmation**.
+Beam 5 matched beam 50 on development but made nine more test errors and two
+more confirmation errors. It therefore must not be described as preserving beam-50
+accuracy. Confirmation errors were still 52.81% below the current INT8 host
+path's 89/258; phone preprocessing and quiet-input safety remain separate gaps.
+
+On one 129-frame input, host CPU encoder execution took 1.04 seconds, cross
+projections 0.005 seconds and the complete beam loop 0.289 seconds, excluding
+graph loading and preparation. Android ORT also produced the exact independent
+29-token sequence; its real native measurements are in
+[ANDROID.md](ANDROID.md#batched-beam-benchmark). Near-tied candidates can remain
+numerically sensitive across runtimes, and these checks are not population-level
+accuracy or physical-phone speed evidence.
