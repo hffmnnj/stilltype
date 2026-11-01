@@ -106,7 +106,7 @@ The Fast export derives a CTC-only mobile graph (~170&nbsp;MB INT8) from the sam
 
 Desktop beam-search quality does not transfer to Fast's CTC-only mobile decoding. Quality uses a different research model and centered alignment; its measured gains and remaining failures are [disclosed separately](docs/RECOGNITION.md#two-additional-speakers), not advertised as 90% product accuracy or phone speed. History is local plaintext; retention controls prune it but do not encrypt it.
 
-**Genuine silent mouthing remains experimental.** Expanded personal visual-model training reduced host INT8 word errors by 66.67% on a fresh recording session from one participant. Test/confirmation WER was 31.29%/26.22%, still far from the 10% target. Those research weights are not bundled in the APK or evidence for other speakers or the user's phone. Ordinary spoken-video gains do not establish silent-dictation accuracy. [Fixed evaluation, personal training recipe and limitations](docs/RECOGNITION.md#fresh-silent-mouthing-session).
+**Genuine silent mouthing remains experimental.** Expanded personal visual-model training reduced host INT8 word errors by 66.67% on a fresh recording session from one participant. Test/confirmation WER was 31.29%/26.22%, still far from the 10% target. Other-speaker accuracy remains poor, and all 27 ungated quiet controls produce text. These research weights are not bundled in the APK or evidence for the user's phone. [Fixed evaluation, personal training recipe and limitations](docs/RECOGNITION.md#fresh-silent-mouthing-session).
 
 The complete two-minute path was exercised too: 3,001 frames through the real
 desktop recognizer and the Android recognizer, plus an actual Android camera

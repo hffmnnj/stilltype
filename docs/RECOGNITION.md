@@ -861,6 +861,34 @@ non-commercial terms still apply. The personal path is ungated; the application
 retains its existing quiet-input checks and models. These weights are not
 bundled in the delivered APK.
 
+#### Constrained-speech and quiet regression
+
+The selected expanded model was also run on all eighty original GRID speech
+clips and twenty-seven short quiet controls, reusing the existing complete
+MediaPipe face/lip preparations without changing their pixels or decoder. This
+was an ungated **host CPU** transfer regression, not Android-native preprocessing
+or another model-selection set:
+
+| Host model | Original development, 120 words | Original test, 120 words | Confirmation, 240 words |
+| --- | ---: | ---: | ---: |
+| Original Base, previous CUDA control | 88/120 = 73.33% | 83/120 = 69.17% | 171/240 = 71.25% |
+| Expanded personal model, CPU | 95/120 = 79.17% | 84/120 = 70.00% | 188/240 = 78.33% |
+
+All 107 inputs completed with finite scores and no preparation or inference
+failures. No speech sentence was exact. **All twenty-seven quiet controls still
+produced nonempty text.** The cross-device control is not a bit-parity comparison
+or proof that every score difference is caused by adaptation; it does establish
+that the selected model still performs poorly on this other-speaker corpus and
+does not meet the original GRID halving goal. Its one-person silent-speech gains
+do not justify a general model replacement or removing the application's quiet
+veto.
+
+An engineer ran the complete CPU batch. The coordinator checked every input and
+prediction identity, scored all retained examples, then independently reloaded
+the exact model state and reproduced one complete quiet raw output and visual
+score on CPU. The frozen prediction SHA-256 is
+`995ca79e1283cd035103001771c075e2c6220726c6c0ef8009d5407e0b35289f`.
+
 #### Development-only decoding follow-up
 
 After the session 005 evaluation was fixed, a separate CPU-only diagnostic
