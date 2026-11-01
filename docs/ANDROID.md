@@ -248,6 +248,63 @@ The API 36 emulator passed speech acceptance, quiet rejection, and a repeated
 correct words: the short fixture still had 5 word errors out of 6. The Pixel
 9 Pro Fold has not run this test.
 
+### Experimental encoder/decoder benchmark
+
+`ExperimentalFlareBenchmarkTest#exportedGraphs_decodeRealFixtureOnCpu` runs the
+research FLARE exports directly through the pinned Android ONNX Runtime. It is
+**not** an application model switch, camera test, GPU test or phone accuracy
+benchmark. These graphs are not bundled in the APK; the model's CC-BY-NC-4.0
+terms still apply. See [RECOGNITION.md](RECOGNITION.md#portable-flare-research-utilities)
+for the exporter, trusted-source requirements and separate Python environments.
+
+After exporting, `tools/benchmark_flare.py` prepares a private directory with
+`face.f32`, `lip.f32`, `manifest.json` and host results. The manifest carries
+graph sizes/hashes, frame count and independently generated host token IDs.
+The Android test validates them, decodes without consulting the reference,
+then requires exact token equality. Missing fixtures, non-finite values, shape
+mismatches and failure to generate EOS cause test failure, not a skipped pass.
+
+Build/install the debug app and instrumentation APK first. Then transfer the
+two graphs and three numeric fixtures to the target app's private storage:
+
+```sh
+adb shell run-as com.stilltype.android mkdir -p files/experimental-flare
+for file in encoder.onnx decoder.onnx; do
+  adb shell -T run-as com.stilltype.android tee "files/experimental-flare/$file" \
+    < "/path/flare-onnx/$file" > /dev/null
+done
+for file in face.f32 lip.f32 manifest.json; do
+  adb shell -T run-as com.stilltype.android tee "files/experimental-flare/$file" \
+    < "/path/android-flare-fixture/$file" > /dev/null
+done
+adb shell am instrument -w -r \
+  -e class 'com.stilltype.android.engine.ExperimentalFlareBenchmarkTest#exportedGraphs_decodeRealFixtureOnCpu' \
+  com.stilltype.android.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Use `adb -s SERIAL` when needed. Token IDs are written only to app-private
+`experimental-flare/results.json`, not logs. Status key
+`stilltypeExperimentalFlare` reports device, provider, timings and sampled PSS.
+
+Coordinator-run API 36 x86_64 emulator results (two virtual cores, 3 GiB guest
+RAM, four ORT threads, CPU only) on one real 128-frame / 5.12-second input:
+
+| Stage | Time |
+| --- | ---: |
+| Encoder session load | 2,471 ms |
+| Decoder session load | 756 ms |
+| Encoder execution | 5,303 ms |
+| Full-prefix greedy decoder | 3,532 ms |
+| Complete instrumentation test | 15.10 s |
+
+All 33 generated tokens matched the host reference. Sampled process PSS was
+112,868 KiB before loading and 1,216,371 KiB after decoding; this is not peak
+memory. Stage timings exclude camera, face processing, fixture transfer and
+graph hashing; the complete test includes its validation/setup work. This
+demonstrates native graph compatibility, not the user's camera-to-text wait on
+a Pixel. Greedy decoding also had worse host WER than the research beam-50
+decoder, so the current app model remains unchanged.
+
 ## Compute notes
 
 `AUTO` requests NNAPI with `CPU_DISABLED`, excluding NNAPI's reference CPU
