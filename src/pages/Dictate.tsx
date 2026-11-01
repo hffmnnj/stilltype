@@ -43,9 +43,9 @@ function Stage() {
       <Guide active={d.cameraOpen} />
       {!d.cameraOpen ? (
         <div className="stage-empty">
-          <Seam size={84} />
-          <p className="stage-line">Say it without a sound.</p>
-          <p className="stage-sub">Your camera stays off until you open it. Nothing leaves this device.</p>
+          <Seam size={44} />
+          <p className="stage-line">Camera off</p>
+          <p className="stage-sub">Open it to check framing, then dictate. Nothing leaves this device.</p>
           {d.phase === 'opening' ? (
             <Spinner label="Waiting for camera…" />
           ) : (
@@ -144,7 +144,16 @@ function Setup() {
   const d = useDictation();
   const { engine, settings, go, loading } = useStore();
   const camOk = d.cameraOpen;
+  // Engine status is unknown until the first check resolves; never claim ready.
+  const engKnown = !loading && engine !== null;
   const engOk = Boolean(engine?.ready);
+  const engineBody = !engKnown
+    ? 'Checking engine status…'
+    : engOk
+      ? `USR 2.0 Base+ ready on ${engine?.device ?? 'this device'}.`
+      : isDesktop
+        ? 'USR 2.0 Base+ (2026), about 1.4 GB, runs on your GPU or CPU.'
+        : 'Runs in the desktop app only.';
   const items = [
     {
       key: 'camera',
@@ -159,12 +168,8 @@ function Setup() {
       key: 'engine',
       done: engOk,
       title: 'Research engine',
-      body: engOk
-        ? `USR 2.0 Base+ ready on ${engine?.device ?? 'this device'}.`
-        : isDesktop
-          ? 'USR 2.0 Base+ (2026), about 1.4 GB, runs on your GPU or CPU.'
-          : 'Runs in the desktop app only.',
-      action: !engOk && isDesktop ? <Button variant={camOk ? 'primary' : 'secondary'} onClick={() => go('models')}>Set up</Button> : null,
+      body: engineBody,
+      action: engKnown && !engOk && isDesktop ? <Button variant={camOk ? 'primary' : 'secondary'} onClick={() => go('models')}>Set up</Button> : null,
     },
     {
       key: 'shortcut',
@@ -180,11 +185,12 @@ function Setup() {
     },
   ];
   const done = items.filter((i) => i.done).length;
+  const ready = engKnown && done === items.length;
   return (
     <section className="aside-block" aria-labelledby="setup-h">
       <div className="aside-head">
-        <h2 id="setup-h" className="aside-title">{done === items.length ? 'Ready' : 'Setup'}</h2>
-        <span className="mono muted">{loading ? '…' : `${done} of ${items.length}`}</span>
+        <h2 id="setup-h" className="aside-title">{ready ? 'Ready' : 'Readiness'}</h2>
+        <span className="mono muted">{!engKnown ? '…' : `${done} of ${items.length}`}</span>
       </div>
       <ol className="checklist">
         {items.map((i) => (
@@ -202,19 +208,6 @@ function Setup() {
           </li>
         ))}
       </ol>
-    </section>
-  );
-}
-
-function Tips() {
-  return (
-    <section className="aside-block" aria-labelledby="tips-h">
-      <h2 id="tips-h" className="aside-title">For a clean read</h2>
-      <ul className="tips">
-        <li>Light your face from the front, not from behind.</li>
-        <li>Keep your head still and your lips in the crop box.</li>
-        <li>Mouth each word a little slower and wider than you would in speech.</li>
-      </ul>
     </section>
   );
 }
@@ -274,7 +267,7 @@ function Transcript() {
           </div>
         </>
       ) : (
-        <p className="transcript-empty">Nothing yet. What you mouth appears here, ready to edit.</p>
+        <p className="transcript-empty">Nothing yet. What you mouth appears here, ready to edit. Light your face from the front and keep your lips in view.</p>
       )}
     </section>
   );
@@ -315,9 +308,8 @@ export function Dictate() {
           ) : null}
           <Transcript />
         </div>
-        <aside className="dictate-aside" aria-label="Setup and tips">
+        <aside className="dictate-aside" aria-label="Readiness">
           <Setup />
-          <Tips />
         </aside>
       </div>
     </div>

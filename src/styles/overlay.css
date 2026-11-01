@@ -1,0 +1,161 @@
+/* Stilltype overlay window. Presentation only; shared semantic tokens come
+   from app.css with local fallbacks so this file stays slice-disjoint.
+   Fit budget for the fixed 420x160 native window: 12px outer margins and
+   12px surface padding leave 112px of vertical room. The surface is one
+   primary row (mark, status, time, actions) plus an optional second line
+   for a real result or error. */
+
+.overlay-root {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  background: transparent;
+}
+
+.overlay-surface {
+  width: min(360px, 100%);
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 18px;
+  background: var(--surface, #fafafa);
+  color: var(--fg, #171717);
+  border: 1px solid var(--line, #e8e8e8);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 0.28), 0 2px 8px rgb(0 0 0 / 0.12);
+}
+
+.overlay-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 32px;
+}
+
+.overlay-row .mark {
+  flex-shrink: 0;
+}
+
+.overlay-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font: 600 13px/1.4 var(--sans, system-ui, sans-serif);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.overlay-time {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.overlay-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.overlay-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 0;
+  background: none;
+  color: var(--muted, #666666);
+  font: 600 12px/1 var(--sans, system-ui, sans-serif);
+  cursor: pointer;
+}
+
+.overlay-tool:hover {
+  background: var(--hover, rgb(0 0 0 / 0.05));
+  color: var(--fg, #171717);
+}
+
+.overlay-tool-go {
+  background: var(--fg, #171717);
+  color: var(--bg, #ffffff);
+  padding: 0 8px;
+}
+
+.overlay-tool-go:hover {
+  color: var(--bg, #ffffff);
+  filter: brightness(1.6);
+}
+
+:root[data-theme='dark'] .overlay-tool-go:hover {
+  filter: brightness(0.85);
+}
+
+.overlay-tool-stop {
+  background: var(--capture, #b72d14);
+  color: var(--on-capture, #ffffff);
+  padding: 0 12px;
+}
+
+.overlay-tool-stop:hover {
+  color: var(--on-capture, #ffffff);
+  filter: brightness(1.1);
+}
+
+.overlay-tool-open {
+  border: 1px solid var(--line-strong, #d4d4d4);
+  color: var(--fg, #171717);
+  padding: 0 10px;
+}
+
+.overlay-tool-dismiss:hover {
+  color: var(--fg, #171717);
+}
+
+.overlay-text {
+  margin: 0;
+  font: 400 13px/1.5 var(--sans, system-ui, sans-serif);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+}
+
+.overlay-message {
+  margin: 0;
+  color: var(--muted, #666666);
+  font-size: 13px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.overlay-surface :focus-visible {
+  outline: 2px solid var(--focus, #2563eb);
+  outline-offset: 2px;
+}
+
+/* Inline preview inside Settings: same component, page background. */
+.overlay-preview {
+  max-width: 400px;
+}
+
+.overlay-preview .overlay-surface {
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.14), 0 1px 4px rgb(0 0 0 / 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay-surface .spin {
+    animation: none;
+  }
+}

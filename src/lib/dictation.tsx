@@ -13,7 +13,15 @@ import { toast } from 'sonner';
 import { api, errorMessage, isDesktop, listenNative } from './api';
 import { StilltypeCamera } from './camera';
 import { useStore } from './store';
-import type { CaptureQuality, HistoryEntry, TranscriptionResult } from './types';
+import type {
+  CaptureQuality,
+  DictationShortcut,
+  HistoryEntry,
+  OverlayAction,
+  OverlayPhase,
+  OverlaySnapshot,
+  TranscriptionResult,
+} from './types';
 import { countWords, isTypingTarget, newId } from './utils';
 
 export type Phase = 'idle' | 'opening' | 'ready' | 'recording' | 'processing';
@@ -50,6 +58,12 @@ interface DictationValue {
   stop: () => Promise<void>;
   cancel: () => Promise<void>;
   toggle: () => Promise<void>;
+  /** Live snapshot for the overlay window and the inline Settings preview. */
+  overlaySnapshot: () => OverlaySnapshot;
+  /** Desktop: ask native to show the overlay with current readiness (no capture). */
+  previewOverlay: () => void;
+  /** Hide the overlay and cancel any pending opening/recording session. */
+  dismissOverlay: () => Promise<void>;
 }
 
 const Ctx = createContext<DictationValue | null>(null);
@@ -72,8 +86,16 @@ function cameraMessage(e: unknown): string {
 
 const EMPTY_MESSAGE = 'No words were recognised. Face the camera, mouth each word clearly, and try again.';
 
+function overlayPhaseFor(phase: Phase, error: string | null, draft: Draft | null): OverlayPhase {
+  if (error) return 'error';
+  if (phase === 'opening') return 'opening';
+  if (phase === 'recording') return 'recording';
+  if (phase === 'processing') return 'processing';
+  return draft ? 'done' : 'ready';
+}
+
 export function DictationProvider({ children }: { children: ReactNode }) {
-  const { settings, engine, history, saveEntry, setCommandOpen } = useStore();
+  const { settings, engine, history, saveEntry, setCommandOpen, go, resolvedTheme } = useStore();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraRef = useRef<StilltypeCamera | null>(null);
   const [phase, setPhaseState] = useState<Phase>('idle');
@@ -98,6 +120,16 @@ export function DictationProvider({ children }: { children: ReactNode }) {
   const cancelledRef = useRef(false);
   const sessionTextRef = useRef(false);
   const appendErrorRef = useRef<string | null>(null);
+  // Session intent: every new session takes a generation. Releasing a hold
+  // shortcut (or dismissing) while camera/model startup is pending bumps the
+  // generation, so the late continuation can never start a recording.
+  const sessionGenRef = useRef(0);
+  // Generation of the session currently in startup, or null once it records.
+  const pendingRef = useRef<number | null>(null);
+  // True when this session opened the camera; a cancelled startup closes it.
+  const sessionOwnedCameraRef = useRef(false);
+  // True while the main window owns a visible native overlay session.
+  const overlayOnRef = useRef(false);
 
   const setPhase = useCallback((p: Phase) => {
     phaseRef.current = p;
@@ -129,7 +161,7 @@ export function DictationProvider({ children }: { children: ReactNode }) {
     return cameraRef.current;
   }, []);
 
-  const openCamera = useCallback(async (): Promise<boolean> => {
+  const openCamera = useCallback(async (gen?: number): Promise<boolean> => {
     if (cameraRef.current?.isOpen) return true;
     const cam = getCamera();
     if (!cam) {
@@ -139,10 +171,23 @@ export function DictationProvider({ children }: { children: ReactNode }) {
     setError(null);
     setPhase('opening');
     try {
-      setDevices(await cam.open(settingsRef.current.cameraId || undefined));
+      const devices = await cam.open(settingsRef.current.cameraId || undefined);
+      if (gen !== undefined && gen !== sessionGenRef.current) {
+        // Cancelled or superseded while opening: release what we just opened.
+        cam.close();
+        setQuality(null);
+        setPhase('idle');
+        return false;
+      }
+      setDevices(devices);
       setPhase('ready');
       return true;
     } catch (e) {
+      if (gen !== undefined && gen !== sessionGenRef.current) {
+        // Cancelled while the open was in flight; stay quiet.
+        setPhase(cameraRef.current?.isOpen ? 'ready' : 'idle');
+        return false;
+      }
       setError(cameraMessage(e));
       setPhase('idle');
       return false;
@@ -173,6 +218,9 @@ export function DictationProvider({ children }: { children: ReactNode }) {
   const accept = useCallback(
     async (r: TranscriptionResult, quiet: boolean) => {
       const text = r.text.trim();
+      // A dismissed session stays quiet: its late result is never saved,
+      // shown, or pasted. Normal captures are unaffected.
+      if (cancelledRef.current) return;
       if (r.error) {
         if (!quiet) setError(r.error);
         return;
@@ -202,6 +250,7 @@ export function DictationProvider({ children }: { children: ReactNode }) {
         }
       }
       setDraft({ text, raw: r.raw, entryId, durationMs: r.durationMs, inferenceMs: r.inferenceMs, dirty: false });
+      if (r.cleanupWarning) toast('Cleanup skipped', { description: r.cleanupWarning });
       if (settingsRef.current.autoPaste && isDesktop) {
         try {
           await api.pasteText(text);
@@ -212,6 +261,128 @@ export function DictationProvider({ children }: { children: ReactNode }) {
     },
     [saveEntry],
   );
+
+  // Invalidate a session still in startup (opening, or the gap before the
+  // first clip starts). Releases a camera this session opened, but never
+  // touches a camera that was already open.
+  const abortPending = useCallback(() => {
+    if (pendingRef.current === null) return;
+    pendingRef.current = null;
+    sessionGenRef.current += 1;
+    cancelledRef.current = true;
+    stopRequestedRef.current = true;
+    if (sessionOwnedCameraRef.current) {
+      sessionOwnedCameraRef.current = false;
+      cameraRef.current?.close();
+      setQuality(null);
+      setPhase('idle');
+    } else if (phaseRef.current === 'opening') {
+      setPhase(cameraRef.current?.isOpen ? 'ready' : 'idle');
+    }
+  }, [setPhase]);
+
+  // Latest live values for overlay snapshots, readable from async callbacks.
+  const liveRef = useRef({
+    phase: 'idle' as Phase,
+    error: null as string | null,
+    draft: null as Draft | null,
+    elapsed: 0,
+    cameraOpen: false,
+    blocked: null as string | null,
+    theme: 'light' as 'light' | 'dark',
+  });
+  liveRef.current = {
+    phase,
+    error,
+    draft,
+    elapsed,
+    cameraOpen: phase !== 'idle' && phase !== 'opening',
+    blocked: blockedReason,
+    theme: resolvedTheme,
+  };
+
+  const buildSnapshot = useCallback((visible: boolean): OverlaySnapshot => {
+    const live = liveRef.current;
+    if (!visible) {
+      return { visible: false, phase: 'ready', elapsed: 0, text: '', message: '', cameraOpen: false, theme: live.theme };
+    }
+    const basePhase = overlayPhaseFor(live.phase, live.error, live.draft);
+    // A blocked-but-otherwise-ready overlay reports error so it uses the
+    // existing error presentation instead of a Start button.
+    const overlayPhase: OverlayPhase = basePhase === 'ready' && live.blocked ? 'error' : basePhase;
+    const message =
+      live.error ??
+      (overlayPhase === 'ready'
+        ? 'Ready'
+        : overlayPhase === 'error'
+          ? (live.blocked ?? '')
+          : overlayPhase === 'opening'
+            ? 'Opening camera…'
+            : overlayPhase === 'processing'
+              ? 'Transcribing…'
+              : '');
+    return {
+      visible: true,
+      phase: overlayPhase,
+      elapsed: live.elapsed,
+      text: live.draft?.text ?? '',
+      message,
+      cameraOpen: live.cameraOpen,
+      theme: live.theme,
+    };
+  }, []);
+
+  const publishSnapshot = useCallback(() => {
+    if (!overlayOnRef.current) return;
+    void api.updateOverlay(buildSnapshot(true)).catch(() => undefined);
+  }, [buildSnapshot]);
+
+  // Keep an owned native overlay on live state: real phase, elapsed, result
+  // or error text, and the resolved theme.
+  useEffect(() => {
+    publishSnapshot();
+  }, [phase, error, draft, elapsed, resolvedTheme, blockedReason, publishSnapshot]);
+
+  const previewOverlay = useCallback(() => {
+    overlayOnRef.current = true;
+    // Native shows the cached snapshot without starting capture or opening
+    // the camera, then emits overlay-action preview so this publishes live
+    // readiness. Never called from the internal start handler.
+    if (isDesktop) void api.overlayAction('preview').catch(() => undefined);
+    publishSnapshot();
+  }, [publishSnapshot]);
+
+  const dismissOverlay = useCallback(async () => {
+    // Stop publishing visible snapshots immediately.
+    overlayOnRef.current = false;
+    abortPending();
+    // Mark the session canceled in any active state so a pending
+    // recognition result is dropped by accept() instead of saving or
+    // auto-pasting after dismissal.
+    if (pendingRef.current !== null || phaseRef.current === 'recording' || phaseRef.current === 'processing') {
+      cancelledRef.current = true;
+      stopRequestedRef.current = true;
+    }
+    if (phaseRef.current === 'recording') {
+      setPhase('processing');
+      try {
+        await segmentRef.current;
+        const id = clipRef.current;
+        clipRef.current = null;
+        await cameraRef.current?.stop().catch(() => undefined);
+        if (id) await api.cancelClip(id);
+      } catch (e) {
+        setError(errorMessage(e));
+      } finally {
+        setPhase(cameraRef.current?.isOpen ? 'ready' : 'idle');
+      }
+    }
+    try {
+      await api.updateOverlay(buildSnapshot(false));
+    } catch {
+      // Native may already be gone; the session is stopped regardless.
+    }
+  }, [abortPending, buildSnapshot, setPhase]);
 
   const beginClip = useCallback(async (onPause: (() => void) | undefined): Promise<void> => {
     const cam = cameraRef.current;
@@ -272,33 +443,87 @@ export function DictationProvider({ children }: { children: ReactNode }) {
     if (phaseRef.current === 'recording' && !segmentRef.current && !stopRequestedRef.current) runSegment();
   };
 
-  const start = useCallback(async () => {
+  const beginSession = useCallback(async (opts: { hold: boolean; overlay: boolean }) => {
+    // Duplicate presses (key repeat, tray, overlay Start) never restart capture.
     if (phaseRef.current === 'recording' || phaseRef.current === 'processing' || phaseRef.current === 'opening') return;
+    const gen = sessionGenRef.current + 1;
+    sessionGenRef.current = gen;
+    pendingRef.current = gen;
     setError(null);
     if (!isDesktop || !engineReadyRef.current) {
+      pendingRef.current = null;
       setError(
         !isDesktop
           ? 'Browser preview cannot transcribe. Use the desktop app to dictate.'
           : 'Install the research engine in Models before dictating.',
       );
+      // A repeated block sets the identical error, so no state effect fires.
+      publishSnapshot();
       return;
     }
-    if (!(await openCamera())) return;
-    stopRequestedRef.current = false;
+    if (opts.overlay) overlayOnRef.current = true;
+    sessionOwnedCameraRef.current = !cameraRef.current?.isOpen;
     cancelledRef.current = false;
+    stopRequestedRef.current = false;
     sessionTextRef.current = false;
     appendErrorRef.current = null;
+    if (!(await openCamera(gen))) {
+      pendingRef.current = null;
+      sessionOwnedCameraRef.current = false;
+      return;
+    }
+    // Released or dismissed while startup was pending: stay stopped and
+    // release a camera opened solely for this session.
+    if (gen !== sessionGenRef.current || cancelledRef.current) {
+      pendingRef.current = null;
+      if (sessionOwnedCameraRef.current) {
+        sessionOwnedCameraRef.current = false;
+        cameraRef.current?.close();
+        setQuality(null);
+        setPhase('idle');
+      }
+      return;
+    }
+    // Ownership stays set across the clip-start gap so a release in that
+    // window still closes a session-owned camera. Cleared once recording
+    // actually begins, or on the paths below.
     try {
-      const segmented = settingsRef.current.dictationMode === 'toggle';
-      await beginClip(segmented ? () => pauseHandlerRef.current?.() : undefined);
+      // Fn is always hold-to-dictate, so it never segments; toggle mode splits.
+      await beginClip(opts.hold ? undefined : () => pauseHandlerRef.current?.());
+      if (gen !== sessionGenRef.current || cancelledRef.current) {
+        // Released or dismissed while the clip was starting: cancel the
+        // newly allocated clip and release a session-owned camera, while a
+        // camera that was already open stays open.
+        const id = clipRef.current;
+        clipRef.current = null;
+        await cameraRef.current?.stop().catch(() => undefined);
+        if (id) await api.cancelClip(id).catch(() => undefined);
+        pendingRef.current = null;
+        if (sessionOwnedCameraRef.current) {
+          sessionOwnedCameraRef.current = false;
+          cameraRef.current?.close();
+          setQuality(null);
+        }
+        setPhase(cameraRef.current?.isOpen ? 'ready' : 'idle');
+        return;
+      }
+      sessionOwnedCameraRef.current = false;
+      pendingRef.current = null;
       startedAtRef.current = performance.now();
       setElapsed(0);
       setPhase('recording');
     } catch (e) {
+      pendingRef.current = null;
+      sessionOwnedCameraRef.current = false;
       setError(errorMessage(e));
-      setPhase('ready');
+      setPhase(cameraRef.current?.isOpen ? 'ready' : 'idle');
     }
-  }, [beginClip, openCamera, setPhase]);
+  }, [beginClip, openCamera, setPhase, publishSnapshot]);
+
+  const start = useCallback(async () => {
+    // In-window capture stays local: it never asks native to show the overlay.
+    await beginSession({ hold: settingsRef.current.dictationMode === 'hold', overlay: false });
+  }, [beginSession]);
 
   const stop = useCallback(async () => {
     if (phaseRef.current !== 'recording') return;
@@ -316,6 +541,11 @@ export function DictationProvider({ children }: { children: ReactNode }) {
   }, [finishClip, setPhase]);
 
   const cancel = useCallback(async () => {
+    if (pendingRef.current !== null || phaseRef.current === 'opening') {
+      abortPending();
+      toast('Capture cancelled');
+      return;
+    }
     if (phaseRef.current !== 'recording') return;
     cancelledRef.current = true;
     stopRequestedRef.current = true;
@@ -350,21 +580,76 @@ export function DictationProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(t);
   }, [phase, stop]);
 
-  // Native global shortcut.
+  // Native global shortcut (main window only).
+  // Explicit publish: native shows its cached snapshot at once, and a
+  // repeated block may leave state unchanged.
+  const publishRef = useRef(publishSnapshot);
+  publishRef.current = publishSnapshot;
   const toggleRef = useRef(toggle);
   toggleRef.current = toggle;
-  const startRef = useRef(start);
-  startRef.current = start;
+  const beginSessionRef = useRef(beginSession);
+  beginSessionRef.current = beginSession;
+  const abortPendingRef = useRef(abortPending);
+  abortPendingRef.current = abortPending;
   const stopRef = useRef(stop);
   stopRef.current = stop;
   useEffect(() => {
     let off: (() => void) | undefined;
     let cancelled = false;
-    void listenNative<{ state: 'pressed' | 'released' }>('dictation-shortcut', ({ state }) => {
-      const hold = settingsRef.current.dictationMode === 'hold';
-      // Repeated 'pressed' events (key repeat, tray menu) never stop a hold-mode clip; the clip limit bounds it.
-      if (state === 'pressed') void (hold ? startRef.current() : toggleRef.current());
-      else if (hold) void stopRef.current();
+    void listenNative<DictationShortcut>('dictation-shortcut', ({ state, source }) => {
+      // Fn is always hold-to-dictate; the configured shortcut respects the
+      // current hold/toggle mode; tray is toggle.
+      const hold = source === 'fn' ? true : source === 'tray' ? false : settingsRef.current.dictationMode === 'hold';
+      if (state === 'pressed') {
+        // Native shows the overlay immediately on press; publish live state.
+        // Duplicate presses never restart capture; the clip limit bounds a hold.
+        overlayOnRef.current = true;
+        publishRef.current();
+        if (hold) void beginSessionRef.current({ hold: true, overlay: true });
+        else void toggleRef.current();
+      } else if (hold) {
+        // Releasing early must prevent a later recording, not just stop one.
+        if (phaseRef.current === 'recording') void stopRef.current();
+        else abortPendingRef.current();
+      }
+    }).then((u) => {
+      if (cancelled) u();
+      else off = u;
+    });
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, []);
+
+  // Native overlay buttons (main window only).
+  const cancelForOverlayRef = useRef(cancel);
+  cancelForOverlayRef.current = cancel;
+  const copyForOverlayRef = useRef<() => Promise<void>>(async () => undefined);
+  const dismissForOverlayRef = useRef(dismissOverlay);
+  dismissForOverlayRef.current = dismissOverlay;
+  const publishForOverlayRef = useRef(publishSnapshot);
+  publishForOverlayRef.current = publishSnapshot;
+  const goRef = useRef(go);
+  goRef.current = go;
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    void listenNative<{ action: OverlayAction } | OverlayAction>('overlay-action', (payload) => {
+      const action: OverlayAction = typeof payload === 'string' ? payload : payload.action;
+      if (action === 'preview') {
+        // Native shows the cached snapshot; publish honest current readiness.
+        overlayOnRef.current = true;
+        publishForOverlayRef.current();
+      } else if (action === 'start') {
+        overlayOnRef.current = true;
+        publishForOverlayRef.current();
+        void beginSessionRef.current({ hold: settingsRef.current.dictationMode === 'hold', overlay: true });
+      } else if (action === 'stop') void stopRef.current();
+      else if (action === 'cancel') void cancelForOverlayRef.current();
+      else if (action === 'copy') void copyForOverlayRef.current();
+      else if (action === 'open') goRef.current('dictate');
+      else if (action === 'dismiss') void dismissForOverlayRef.current();
     }).then((u) => {
       if (cancelled) u();
       else off = u;
@@ -438,6 +723,7 @@ export function DictationProvider({ children }: { children: ReactNode }) {
       toast.error('Could not copy', { description: errorMessage(e) });
     }
   }, [draft]);
+  copyForOverlayRef.current = copyDraft;
 
   const pasteDraft = useCallback(async () => {
     if (!draft?.text) return;
@@ -447,6 +733,8 @@ export function DictationProvider({ children }: { children: ReactNode }) {
       toast.error('Could not paste', { description: errorMessage(e) });
     }
   }, [draft]);
+
+  const overlaySnapshot = useCallback((): OverlaySnapshot => buildSnapshot(true), [buildSnapshot]);
 
   const value = useMemo<DictationValue>(
     () => ({
@@ -472,10 +760,14 @@ export function DictationProvider({ children }: { children: ReactNode }) {
       stop,
       cancel,
       toggle,
+      overlaySnapshot,
+      previewOverlay,
+      dismissOverlay,
     }),
     [
       phase, devices, refreshDevices, quality, error, elapsed, draft, editDraft, saveDraft, discardDraft, copyDraft,
       pasteDraft, blockedReason, openCamera, closeCamera, start, stop, cancel, toggle,
+      overlaySnapshot, previewOverlay, dismissOverlay,
     ],
   );
 

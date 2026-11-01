@@ -1,7 +1,8 @@
 import * as D from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { BookA, Camera, CameraOff, Circle, Cpu, History, Moon, ScanFace, Settings, Square, Sun, SunMoon } from 'lucide-react';
+import { AppWindow, BookA, Camera, CameraOff, Circle, Cpu, History, Moon, ScanFace, Settings, Square, Sun, SunMoon } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { isDesktop } from '../lib/api';
 import { useDictation } from '../lib/dictation';
 import { useStore, type View } from '../lib/store';
 import type { Theme } from '../lib/types';
@@ -40,6 +41,9 @@ export function CommandMenu() {
                 ) : (
                   <Command.Item value="open camera" onSelect={run(() => { go('dictate'); void d.openCamera(); })}><Camera size={16} aria-hidden />Open camera</Command.Item>
                 )}
+                {isDesktop ? (
+                  <Command.Item value="show overlay" onSelect={run(() => d.previewOverlay())}><AppWindow size={16} aria-hidden />Show overlay</Command.Item>
+                ) : null}
               </Command.Group>
               <Command.Group heading="Go to">
                 {nav('dictate', 'Dictate', <ScanFace size={16} aria-hidden />)}

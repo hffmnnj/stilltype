@@ -120,7 +120,7 @@ export class StilltypeCamera {
   private session: ort.InferenceSession | null = null;
   private sessionGen = 0;
   private inferenceInFlight = false;
-  private rafId = 0;
+  private timerId = 0;
 
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
@@ -310,9 +310,11 @@ export class StilltypeCamera {
     this.isOpen = false;
     this.inferenceInFlight = false;
 
-    if (this.rafId !== 0) {
-      cancelAnimationFrame(this.rafId);
-      this.rafId = 0;
+    // Bounded timer cadence, not rAF: capture continues while the main
+    // window is hidden behind the overlay. clearTimeout cancels the loop.
+    if (this.timerId !== 0) {
+      window.clearTimeout(this.timerId);
+      this.timerId = 0;
     }
     this.stopTracks();
     this.video.removeAttribute('src');
@@ -388,16 +390,23 @@ export class StilltypeCamera {
   }
 
   private startLoop(): void {
-    if (this.rafId !== 0) return; // never run duplicate loops after reopen
+    // Timer cadence, never rAF: the detector must keep running while the
+    // main window is hidden and the overlay is showing. At most one
+    // inference is ever in flight; close() clears the pending timeout.
+    if (this.timerId !== 0) return; // never run duplicate loops after reopen
     const tick = () => {
       if (!this.isOpen) {
-        this.rafId = 0;
+        this.timerId = 0;
         return;
       }
-      this.rafId = requestAnimationFrame(tick);
       this.tick(performance.now());
+      if (!this.isOpen) {
+        this.timerId = 0;
+        return;
+      }
+      this.timerId = window.setTimeout(tick, DETECT_INTERVAL_MS);
     };
-    this.rafId = requestAnimationFrame(tick);
+    this.timerId = window.setTimeout(tick, 0);
   }
 
   private tick(now: number): void {

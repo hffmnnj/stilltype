@@ -49,7 +49,7 @@ function EditDialog({ entry, onClose }: { entry: HistoryEntry | null; onClose: (
           }
         >
           <label className="visually-hidden" htmlFor="edit-text">Transcript text</label>
-          <textarea id="edit-text" className="field field-serif" rows={6} value={text} onChange={(e) => setText(e.target.value)} />
+          <textarea id="edit-text" className="field field-large" rows={6} value={text} onChange={(e) => setText(e.target.value)} />
           {err ? <Notice tone="error">{err}</Notice> : null}
         </DialogContent>
       ) : null}

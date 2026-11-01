@@ -123,7 +123,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     document.documentElement.dataset.theme = resolvedTheme;
     document.documentElement.style.colorScheme = resolvedTheme;
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolvedTheme === 'dark' ? '#16130F' : '#F4EEE2');
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolvedTheme === 'dark' ? '#0A0A0A' : '#FFFFFF');
   }, [resolvedTheme]);
 
   // navigation via ?view=

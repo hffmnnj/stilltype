@@ -3641,6 +3641,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "enigo",
+ "gtk",
  "llama-cpp-2",
  "reqwest 0.12.28",
  "serde",

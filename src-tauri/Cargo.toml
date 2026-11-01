@@ -7,7 +7,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
@@ -25,3 +25,6 @@ llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["vul
 
 [target.'cfg(target_os = "macos")'.dependencies]
 llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["metal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"

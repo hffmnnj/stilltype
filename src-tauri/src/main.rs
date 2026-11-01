@@ -1,13 +1,14 @@
 mod capture;
 mod cleanup;
 mod engine;
+mod fn_key;
+mod overlay;
 mod state;
 use capture::{Clips, Frame};
 use enigo::{
     Direction::{Click, Press, Release},
     Enigo, Key, Keyboard, Settings as InputSettings,
 };
-use serde_json::json;
 use state::{AppState, HistoryEntry, Settings, VocabularyWord};
 use std::{
     path::PathBuf,
@@ -20,7 +21,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Emitter, Manager, State,
+    Manager, State,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -345,12 +346,7 @@ fn main() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _, event| {
-                    let state = if event.state == ShortcutState::Pressed {
-                        "pressed"
-                    } else {
-                        "released"
-                    };
-                    let _ = app.emit("dictation-shortcut", json!({"state":state}));
+                    overlay::shortcut(app, event.state == ShortcutState::Pressed, "shortcut");
                 })
                 .build(),
         )
@@ -363,6 +359,10 @@ fn main() {
             }
         })
         .setup(|app| {
+            app.manage(overlay::OverlayState::default());
+            let fn_monitor = Arc::new(fn_key::FnMonitor::default());
+            app.manage(fn_monitor.clone());
+            fn_key::install(app.handle(), fn_monitor);
             let data = app.path().app_data_dir()?;
             let resource = app.path().resource_dir()?.join("engine");
             std::fs::create_dir_all(&data)?;
@@ -401,7 +401,7 @@ fn main() {
                             }
                         }
                         "dictate" => {
-                            let _ = app.emit("dictation-shortcut", json!({"state":"pressed"}));
+                            overlay::shortcut(app, true, "tray");
                         }
                         "quit" => app.exit(0),
                         _ => {}
@@ -415,7 +415,13 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                if window.label() == "overlay" {
+                    if let Some(state) = window.app_handle().try_state::<overlay::OverlayState>() {
+                        let _ = overlay::dismiss(window.app_handle(), &state);
+                    }
+                } else {
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -436,12 +442,19 @@ fn main() {
             paste_text,
             cleanup_status,
             install_cleanup,
-            export_data
+            export_data,
+            overlay::get_overlay_state,
+            overlay::update_overlay,
+            overlay::overlay_action,
+            fn_key::shortcut_status
         ])
         .build(tauri::generate_context!())
         .expect("Failed to build Stilltype")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(monitor) = app.try_state::<Arc<fn_key::FnMonitor>>() {
+                    fn_key::stop(&monitor);
+                }
                 if let Some(core) = app.try_state::<Arc<Core>>() {
                     if let Ok(child) = core.worker_child.lock() {
                         if let Some(child) = child.as_ref() {

@@ -1,14 +1,15 @@
 import { Keyboard, RefreshCw, Trash2 } from 'lucide-react';
-import { useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { toast } from 'sonner';
 import { Dialog, DialogClose, DialogContent } from '../components/ui/dialog';
 import { Button, Keycaps, Notice, PageHeader, Segmented } from '../components/ui/misc';
 import { Toggle } from '../components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
-import { errorMessage, isDesktop } from '../lib/api';
+import { OverlayView } from '../components/OverlayView';
+import { api, errorMessage, isDesktop } from '../lib/api';
 import { useDictation } from '../lib/dictation';
 import { useStore } from '../lib/store';
-import type { Settings as S } from '../lib/types';
+import type { OverlayAction, Settings as S, ShortcutStatus } from '../lib/types';
 import { acceleratorFromEvent, isLinux, modKey, shortcutKeys } from '../lib/utils';
 
 function RangeRow({
@@ -105,6 +106,84 @@ function ShortcutRow() {
   );
 }
 
+function FnRow() {
+  const [status, setStatus] = useState<ShortcutStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(true);
+  const load = useCallback(async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      setStatus(await api.shortcutStatus());
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const hint = !isDesktop
+    ? 'System shortcuts need the desktop app.'
+    : modKey === '⌘'
+      ? 'The Fn key is hold-to-dictate and needs Input Monitoring permission. Grant it in System Settings, then restart Stilltype.'
+      : 'Most PC firmware reserves the Fn key, so it is not a reliable trigger. Use the global shortcut below instead.';
+  return (
+    <div className="row">
+      <div className="row-text">
+        <p className="row-label">Fn key</p>
+        <p className="row-hint">{hint}</p>
+        <p className="mono small" role="status">{busy ? 'Checking…' : (err ?? status?.message ?? '')}</p>
+      </div>
+      <div className="inline">
+        <Button onClick={() => void load()} busy={busy} disabled={busy}>
+          {!busy ? <RefreshCw size={15} aria-hidden /> : null} Refresh
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function OverlayRow() {
+  const d = useDictation();
+  const { go } = useStore();
+  const [preview, setPreview] = useState(false);
+  const onAction = (action: OverlayAction) => {
+    if (action === 'dismiss') setPreview(false);
+    else if (action === 'copy') void d.copyDraft();
+    else if (action === 'open') {
+      setPreview(false);
+      go('dictate');
+    } else if (action === 'preview') d.previewOverlay();
+    else if (action === 'start') void d.start();
+    else if (action === 'stop') void d.stop();
+    else if (action === 'cancel') void d.cancel();
+  };
+  return (
+    <div className="row row-stack">
+      <div className="row-text">
+        <p className="row-label">Overlay</p>
+        <p className="row-hint">
+          A compact window that follows dictation from any app. The preview below shows live readiness in this
+          page without starting the camera{isDesktop ? '; “Show in overlay window” opens the native window.' : '.'}
+        </p>
+      </div>
+      <div className="inline">
+        <Button onClick={() => setPreview((v) => !v)} aria-expanded={preview}>
+          {preview ? 'Hide preview' : 'Preview overlay'}
+        </Button>
+        {isDesktop ? <Button onClick={() => d.previewOverlay()}>Show in overlay window</Button> : null}
+      </div>
+      {preview ? (
+        <div className="overlay-preview">
+          <OverlayView snapshot={d.overlaySnapshot()} onAction={onAction} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ContextRow() {
   const { settings, updateSettings } = useStore();
   const id = useId();
@@ -196,6 +275,7 @@ export function SettingsPage() {
         </TabsContent>
 
         <TabsContent value="dictation">
+          <FnRow />
           <ShortcutRow />
           <div className="row">
             <div className="row-text">
@@ -225,6 +305,7 @@ export function SettingsPage() {
             }
           />
           <ContextRow />
+          <OverlayRow />
           <RangeRow label="Beam size" hint="5 is a good balance. Larger beams use more memory and may be slower." value={settings.beamSize} min={1} max={60} step={1} onCommit={(v) => set({ beamSize: v })} />
           <RangeRow label="Pause length" hint="Silence that ends a phrase in toggle mode." value={settings.pauseSeconds} min={0.3} max={2} step={0.1} unit="s" onCommit={(v) => set({ pauseSeconds: v })} disabled={settings.dictationMode === 'hold'} />
           <RangeRow label="Longest clip" hint="Recording stops by itself at this length." value={settings.maxClipSeconds} min={5} max={120} step={5} unit="s" onCommit={(v) => set({ maxClipSeconds: v })} />
