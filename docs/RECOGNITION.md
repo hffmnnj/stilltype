@@ -422,8 +422,19 @@ native preprocessing parity.
 
 The current INT8 CTC-evidence path showed a different sensitivity on those same
 development clips: 44/170 errors with centered smoothing, 47/170 per frame and
-40/170 with the causal mean. No geometry default is changed by a development
-score alone; held-out, quiet-input and actual Android checks remain necessary.
+40/170 with the causal mean. The fixed causal candidate then gave 90/204 test
+errors versus 91/204 per frame, but worsened locked confirmation from 86/258 to
+90/258. It was rejected as a current CTC default; no phone geometry was changed.
+
+Two further raw visual candidates did not meet the predeclared development
+eligibility rule of at most 17 errors versus the fixed 20/170 baseline. An equal-
+probability normal-plus-horizontal-mirror ensemble gave 21/170; an identical-view
+ensemble control first matched the independent complete token reference. The
+released training transform includes horizontal reflection, but that does not
+guarantee a test-time ensemble benefit. The released lip-only modality mask gave
+19/170, a one-word gain below the eligibility threshold. Neither candidate was
+run on held-out data or adopted. No new word lists, reference hints, training or
+correction prompts were introduced.
 
 An independent **audio-only reference audit**, not a Stilltype inference path,
 used the 2026 [Qwen3-ASR-0.6B native conversion](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf)
@@ -529,7 +540,7 @@ for actual native execution and its different performance envelope.
 
 `--decoder-mode beam` exports `encoder.onnx`, `cross.onnx` and
 `decoder-beam.onnx`. The runtime command stays the same: metadata selects a
-fixed beam width of five. The decoder accepts dynamic beam rows, including a
+beam width of five by default, or 50 with `--beam-size 50`. The decoder accepts dynamic beam rows, including a
 single initial row with empty self caches; the caller repeats cross projections
 and reorders self caches by each selected parent. Search uses cumulative
 float32 log probabilities, length penalty 1, stable flat-index tie ordering,
@@ -554,9 +565,40 @@ graph loading and preparation. Android ORT also produced the exact independent
 numerically sensitive across runtimes, and these checks are not population-level
 accuracy or physical-phone speed evidence.
 
+### Full beam search with bounded execution rows
+
+Export with `--decoder-mode beam --beam-size 50` to preserve the research
+beam-50 search. This changes search metadata, not the three dynamic-row graph
+bytes. The runtime and storage packer accept widths 5 or 50; other widths and
+nondefault beam sizes with full/cached export modes are rejected.
+
+All active hypotheses are evaluated each step, but native decoder calls contain
+at most five contiguous rows. Cross projections and masks are repeated once for
+one/five rows, not for all 50 beams on every step. The caller collects every row
+before global candidate ranking, finalization and parent-cache reordering.
+**This is not ten independent five-beam searches or pruning to five survivors.**
+Old self caches are released once consumed, before allocating reordered caches.
+The existing token, tie, length-normalization and failure-bound rules remain.
+
+The coordinator ran the actual exporter, packer and CPU runtime. All 12 complete
+development sequences matched independent Torch/fairseq beam-50 references. All
+40 raw texts matched the prior Torch beam-50 results, recovering its **20/170,
+47/204 and 40/258** errors rather than the five-beam compromise. Compact stored
+weights also matched all 40 complete FP32 beam-50 sequences. These are bounded
+cohort parity results, not a universal guarantee for near-tied hypotheses.
+
+In separate host prototype runs, five-row execution reduced maximum sampled
+RSS from 2.92 GB to 2.05 GB, while summed decoder-loop time across 12 clips fell
+from 55.06 to 22.97 seconds. Those are separate-run process samples, not peaks or
+controlled phone results. A coordinator single-clip reproduction read a 1.49 GB
+current-process high-water mark from `/proc/self/status`. The older `ru_maxrss`
+value carried pre-exec history in this launch environment and is not usable as
+the model's memory peak. Native Android parity and its different timing envelope
+are documented in [ANDROID.md](ANDROID.md#full-beam-with-bounded-native-batches).
+
 ### Compact weight storage
 
-`tools/pack_flare.py` creates a smaller copy of a trusted beam-5 export:
+`tools/pack_flare.py` creates a smaller copy of a trusted beam-5 or beam-50 export:
 
 ```sh
 "$RUNTIME_PY" tools/pack_flare.py --model-dir /path/flare-beam-onnx \
@@ -599,3 +641,21 @@ but increased development errors from 20/170 to 22/170. Restoring FP32 cross
 projections and decoder while retaining the INT8 encoder still gave 22/170.
 Those candidates were not run on held-out data or adopted. Smaller files alone
 are not sufficient evidence of a better recognizer.
+
+### Further fixed development probes
+
+A horizontal-mirror probability ensemble used the unchanged released beam-50
+search, two independent encoder states, and the same weights for both views.
+An identical-view control reproduced the original output, but the mirrored
+candidate increased development errors from 20/170 to 21/170. Masking the full-
+face branch and retaining only the lip branch gave 19/170. Neither met the fixed
+eligibility threshold of at most 17 errors; neither received another held-out
+comparison or became a default.
+
+A separate routing calculation vetoed Quality output whenever the saved current
+per-frame CTC result had an error or empty text. All 40 speech clips were admitted,
+leaving FLARE's 20/170, 47/204 and 40/258 scores unchanged. This demonstrates no
+accuracy cost on those admitted samples, not validated integrated quiet behavior.
+The earlier CTC quiet controls used host desktop-aligned ROIs. Actual Android
+preprocessing and the combined pipeline still need direct checks; an ungated
+model switch remains inappropriate.

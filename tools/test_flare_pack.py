@@ -86,6 +86,8 @@ class FlarePackTest(unittest.TestCase):
         (self.source / "metadata.json").write_text(json.dumps(self.metadata), encoding="utf-8")
 
     def test_pack_preserves_computation_with_rounded_weights_and_unconverted_values(self):
+        self.metadata["beamSize"] = 50
+        self.write_metadata()
         summary = pack_flare.pack(self.source, self.output)
         packed = onnx.load(str(self.output / "encoder.onnx"))
         onnx.checker.check_model(packed)
@@ -113,6 +115,7 @@ class FlarePackTest(unittest.TestCase):
         expected = ((x + self.weights.astype(np.float16).astype(np.float32)) + override) + np.float32(0.125)
         np.testing.assert_array_equal(actual, expected)
         metadata = json.loads((self.output / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["beamSize"], 50)
         self.assertEqual(metadata["symbols"], self.metadata["symbols"])
         self.assertEqual(metadata["sourceCheckpointSha256"], export_flare.CHECKPOINT_SHA256)
         self.assertEqual(metadata["license"], "CC-BY-NC-4.0")
@@ -140,6 +143,14 @@ class FlarePackTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "normalization"):
             pack_flare.pack(self.source, self.output)
         self.assertFalse(self.output.exists())
+
+    def test_beam_width_validation_keeps_five_and_rejects_invalid_types(self):
+        self.assertEqual(set(pack_flare.validate_source(self.source, self.metadata)),
+                         {"encoder", "cross", "beamDecoder"})
+        for size in (4, 5.0, True):
+            self.metadata["beamSize"] = size
+            with self.subTest(size=size), self.assertRaisesRegex(ValueError, "beam size"):
+                pack_flare.validate_source(self.source, self.metadata)
 
     def test_external_tensor_is_rejected_without_metadata(self):
         tensor = self.model.graph.initializer[0]

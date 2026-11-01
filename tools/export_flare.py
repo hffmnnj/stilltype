@@ -76,9 +76,13 @@ def load_sample(path: Path) -> tuple[Any, Any]:
 
 
 def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, device: str,
-           decoder_mode: str = "full") -> dict[str, Any]:
+           decoder_mode: str = "full", beam_size: int = 5) -> dict[str, Any]:
     if decoder_mode not in ("full", "cached", "beam"):
         raise ValueError("decoder mode must be full, cached, or beam")
+    if type(beam_size) is not int or beam_size not in (5, 50):
+        raise ValueError("beam size must be 5 or 50")
+    if decoder_mode != "beam" and beam_size != 5:
+        raise ValueError("beam size other than 5 requires beam decoder mode")
     output = validate_output(output)
     if not (source / "flare" / "__init__.py").is_file():
         raise ValueError("source must be a trusted FLARE checkout containing flare/__init__.py")
@@ -325,7 +329,7 @@ def export(checkpoint: Path, source: Path, sample_path: Path, output: Path, devi
                          cacheHeadDim=CACHE_HEAD_DIM, crossBytes=files[1]["sizeBytes"],
                          crossSha256=files[1]["sha256"])
         if decoder_mode == "beam":
-            metadata.update(beamSize=5, beamDecoderBytes=files[2]["sizeBytes"],
+            metadata.update(beamSize=beam_size, beamDecoderBytes=files[2]["sizeBytes"],
                             beamDecoderSha256=files[2]["sha256"])
         else:
             metadata.update(cachedDecoderBytes=files[2]["sizeBytes"],
@@ -342,11 +346,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True, help="Output directory outside the repository.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--decoder-mode", choices=("full", "cached", "beam"), default="full")
+    parser.add_argument("--beam-size", type=int, choices=(5, 50), default=5)
     parser.add_argument("--accept-license", action="store_true", required=True, help="Accept CC-BY-NC-4.0 model terms.")
     args = parser.parse_args(argv)
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            result = export(args.checkpoint, args.source, args.sample, args.output, args.device, args.decoder_mode)
+            result = export(args.checkpoint, args.source, args.sample, args.output, args.device,
+                            args.decoder_mode, args.beam_size)
     except (ValueError, RuntimeError, OSError, ImportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
