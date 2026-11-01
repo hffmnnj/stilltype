@@ -532,6 +532,60 @@ also passed. These are reproducibility checks, not additional accuracy data:
 python -m unittest discover -s tools -p 'test_flare_llm.py' -v
 ```
 
+#### Native visual decoding
+
+The independent Linux research runner in `tools/flare_llm/` consumes those
+projected inputs directly. It links a trusted local llama.cpp checkout; it does
+not download weights, start a server, or change the application's engine:
+
+```sh
+cmake -S tools/flare_llm -B /path/new-native-build \
+  -DLLAMA_CPP_SOURCE=/path/trusted-llama.cpp
+cmake --build /path/new-native-build --parallel 4
+ctest --test-dir /path/new-native-build --output-on-failure
+
+/path/new-native-build/stilltype-flare-llm 1 \
+  /path/Qwen2.5-7B.Q4_K_M.gguf /path/new-flare-adapter.gguf \
+  /path/private-results/predictions.jsonl /path/new-projected-input/visual.bin
+```
+
+Use llama.cpp revision `d81235049384534c167caea52b85a694f6103d14` and the pinned
+base/adapter artifacts above. Architecture and prompt-token checks establish
+compatibility, not authenticity; GGUF files must come from a trusted source.
+The output's parent must already exist outside Git. New JSONL files are created
+exclusively with mode `0600`; existing files and final-component symlinks are
+refused. Each record's ID is its input filename stem, so give batch inputs unique
+basenames. Raw text goes only to that file; stdout reports bounded completion
+counts and stderr reports progress/native diagnostics. A fatal error can leave
+a private partial file. `output_complete: true` requires successful writes and
+close, but does not promise crash-durable storage.
+
+Widths 1, 5 and 30 use the source's active stage-3 shrinking search: temperature
+1.2, global cumulative log probabilities, EOS finalization normalized by generated
+length, and a 128-token limit. No EOS is forced at the limit, and an incomplete
+search is a scored failure even if a provisional completed hypothesis exists.
+Stable parent/token tie ordering and disjoint temporary sequence IDs preserve
+parent-cache ownership when survivors duplicate or permute parents. Wider search
+uses unified KV storage; estimated F16 caches are 28, 140 and 840 MiB respectively.
+Before model loading, Linux `MemAvailable` must cover an 8 GiB baseline plus that
+estimate. This is a conservative preflight, not an allocation guarantee.
+
+The coordinator built the full CPU runner, passed its selection and output-privacy
+checks, and reproduced a complete 129-frame raw prediction and natural EOS using
+the public preparation output. The output file was mode `0600`; all completion
+counts matched. That single prefill/decode took 6.34 seconds on the host, excluding
+projection/model loading and not a controlled speed comparison.
+
+A separate frozen twelve-clip development comparison found **exactly the same
+raw texts at widths 1, 5 and 30**: all gave 15/170 errors and reached natural EOS.
+Summed per-item prefill/decode times were 107.89, 189.72 and 737.93 seconds in
+separate host runs, not camera-to-text timings. Widths 5 and 30 failed the fixed
+eligibility rule of at most 12 errors, so neither received a new held-out run or
+became a default. Their frozen JSONL SHA-256 values are, respectively,
+`260aa88821bc18334b174d9de9af80c2263f2c7d81bf9de1887b77456b553b6e`,
+`51c5701cf1428c243ab6464f29cc9c4b3db972131b7e2a317ce6a2ac7f0bc638`, and
+`b71b4da23abd1f257c36117ad023c5adf2ce566477e746d086c33fa92a619461`.
+
 ### Rejected sampling change
 
 A timestamp-aware sampler reproduced the original prepared pixels before
