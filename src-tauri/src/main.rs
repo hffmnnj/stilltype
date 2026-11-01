@@ -196,8 +196,9 @@ impl Drop for CleanupInstallGuard {
     }
 }
 #[tauri::command]
-fn cleanup_status(core: State<'_, Arc<Core>>) -> cleanup::Status {
-    cleanup::status(&core.data, &core.cleanup)
+fn cleanup_status(core: State<'_, Arc<Core>>) -> Result<cleanup::Status, String> {
+    let model = lock(&core.state)?.settings.cleanup_model.clone();
+    Ok(cleanup::status(&core.data, &core.cleanup, &model))
 }
 #[tauri::command]
 async fn install_cleanup(
@@ -214,8 +215,9 @@ async fn install_cleanup(
     let core = core.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = CleanupInstallGuard(core.clone());
-        cleanup::install(&app, &core.data, &core.cleanup)?;
-        Ok(cleanup::status(&core.data, &core.cleanup))
+        let model = lock(&core.state)?.settings.cleanup_model.clone();
+        cleanup::install(&app, &core.data, &core.cleanup, &model)?;
+        Ok(cleanup::status(&core.data, &core.cleanup, &model))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -266,14 +268,25 @@ async fn transcribe(
             )
         });
         if let Ok(result) = &mut result {
-            if settings.cleanup_enabled && result.error.is_none() && !result.text.trim().is_empty()
+            if settings.cleanup_enabled
+                && (r#final || settings.cleanup_mode == state::CleanupMode::Format)
+                && result.error.is_none()
+                && !result.text.trim().is_empty()
             {
                 let started = std::time::Instant::now();
                 match cleanup::run(
                     core.cleanup.clone(),
                     core.data.clone(),
                     settings.inference_device.clone(),
+                    settings.cleanup_model.clone(),
+                    settings.cleanup_mode,
                     result.text.clone(),
+                    settings.context.clone(),
+                    vocabulary
+                        .iter()
+                        .flat_map(|v| [v.word.clone(), v.replacement.clone()])
+                        .filter(|v| !v.trim().is_empty())
+                        .collect(),
                 ) {
                     Ok(text) => result.text = text,
                     Err(error) => result.cleanup_warning = Some(error),

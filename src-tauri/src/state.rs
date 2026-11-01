@@ -3,6 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CleanupMode {
+    #[default]
+    Format,
+    Intent,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -17,6 +25,7 @@ pub struct Settings {
     pub retention_days: u32,
     pub cleanup_enabled: bool,
     pub cleanup_model: String,
+    pub cleanup_mode: CleanupMode,
     pub pause_seconds: f64,
     pub beam_size: u32,
     pub inference_device: String,
@@ -36,7 +45,8 @@ impl Default for Settings {
             keep_history: true,
             retention_days: 30,
             cleanup_enabled: false,
-            cleanup_model: "qwen3.5-0.8b-2026-q4".into(),
+            cleanup_model: "auto".into(),
+            cleanup_mode: CleanupMode::Format,
             pause_seconds: 0.7,
             beam_size: 5,
             inference_device: "auto".into(),
@@ -53,7 +63,7 @@ impl Settings {
             || self.camera_id.len() > 1024
             || self.shortcut.is_empty()
             || self.shortcut.len() > 128
-            || self.cleanup_model.len() > 256
+            || !crate::cleanup::valid_model_choice(&self.cleanup_model)
             || self.context.len() > 8192
             || !(1..=60).contains(&self.beam_size)
             || !(5..=120).contains(&self.max_clip_seconds)
@@ -309,6 +319,17 @@ mod tests {
         entry.validate().unwrap();
         entry.duration_ms = 120_001;
         assert!(entry.validate().is_err());
+    }
+    #[test]
+    fn legacy_cleanup_settings_default_to_disabled_format_and_validate_model_ids() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.cleanup_enabled);
+        assert_eq!(settings.cleanup_mode, CleanupMode::Format);
+        assert_eq!(settings.cleanup_model, "auto");
+        settings.validate().unwrap();
+        let mut invalid = settings;
+        invalid.cleanup_model = "unrecognized".into();
+        assert!(invalid.validate().is_err());
     }
     #[test]
     fn csv_escapes_formulas_and_quotes() {
