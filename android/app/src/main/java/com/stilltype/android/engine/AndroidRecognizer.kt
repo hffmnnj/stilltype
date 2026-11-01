@@ -4,8 +4,10 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
+import ai.onnxruntime.providers.NNAPIFlags
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
 import com.stilltype.android.core.ComputeMode
 import com.stilltype.android.core.FrameAnalysis
 import com.stilltype.android.core.InstalledModels
@@ -18,6 +20,7 @@ import com.stilltype.android.core.RecognitionResult
 import com.stilltype.android.core.VisualRecognizer
 import java.io.File
 import java.nio.FloatBuffer
+import java.util.EnumSet
 import kotlin.coroutines.CoroutineContext
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -40,6 +43,8 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
     private var sessionDirectory: File? = null
     private var detectorDirectory: File? = null
     private var provider = "CPU"
+    private val profileDirectory = context.applicationContext.cacheDir
+    private var profilePrefix: File? = null
 
     override fun analyze(bitmap: Bitmap, timestampMs: Long): FrameAnalysis = synchronized(lock) {
         try {
@@ -111,28 +116,35 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
                     }
                 }
                 val started = System.nanoTime()
-                val text = OnnxTensor.createTensor(env, FloatBuffer.wrap(input), longArrayOf(1, n.toLong(), 88, 88)).use { tensor ->
-                    session.run(mapOf(installed.manifest.inputName to tensor)).use { result ->
-                        val logits = result.get(installed.manifest.outputName).orElseThrow { IllegalStateException("Missing logits") } as OnnxTensor
-                        val shape = (logits.info as TensorInfo).shape
-                        require(shape.contentEquals(longArrayOf(1, n.toLong(), tokens.size.toLong()))) { "Invalid CTC output shape" }
-                        val values = logits.floatBuffer
-                        var previous = -1
-                        val words = StringBuilder()
-                        repeat(n) {
-                            var best = 0
-                            var score = Float.NEGATIVE_INFINITY
-                            for (id in tokens.indices) {
-                                val value = values.get()
-                                if (value > score) { score = value; best = id }
+                var completed = false
+                val text = try {
+                    val decoded = OnnxTensor.createTensor(env, FloatBuffer.wrap(input), longArrayOf(1, n.toLong(), 88, 88)).use { tensor ->
+                        session.run(mapOf(installed.manifest.inputName to tensor)).use { result ->
+                            val logits = result.get(installed.manifest.outputName).orElseThrow { IllegalStateException("Missing logits") } as OnnxTensor
+                            val shape = (logits.info as TensorInfo).shape
+                            require(shape.contentEquals(longArrayOf(1, n.toLong(), tokens.size.toLong()))) { "Invalid CTC output shape" }
+                            val values = logits.floatBuffer
+                            var previous = -1
+                            val words = StringBuilder()
+                            repeat(n) {
+                                var best = 0
+                                var score = Float.NEGATIVE_INFINITY
+                                for (id in tokens.indices) {
+                                    val value = values.get()
+                                    if (value > score) { score = value; best = id }
+                                }
+                                if (best != previous && best != installed.manifest.blankId && best != installed.manifest.eosId) words.append(tokens[best])
+                                previous = best
                             }
-                            if (best != previous && best != installed.manifest.blankId && best != installed.manifest.eosId) words.append(tokens[best])
-                            previous = best
+                            words.toString().replace("▁", " ").trim()
                         }
-                        words.toString().replace("▁", " ").trim()
                     }
+                    totalMs += (System.nanoTime() - started) / 1_000_000
+                    completed = true
+                    decoded
+                } finally {
+                    finishProfiling(session, completed)
                 }
-                totalMs += (System.nanoTime() - started) / 1_000_000
                 if (text.isNotEmpty()) parts.add(text)
             }
             if (!hadSpeech) return failure("no-speech")
@@ -147,25 +159,79 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
 
     private fun getSession(installed: InstalledModels, mode: ComputeMode): OrtSession {
         if (recognition != null && sessionMode == mode && sessionDirectory == installed.directory) return recognition!!
-        recognition?.close()
+        recognition?.let { session ->
+            try { finishProfiling(session, false) } finally { session.close() }
+        }
         recognition = null
         val path = File(installed.directory, "usr2-ctc-int8.onnx").absolutePath
         fun create(nnapi: Boolean): OrtSession = OrtSession.SessionOptions().use { options ->
             options.setIntraOpNumThreads(4)
             options.setInterOpNumThreads(1)
-            if (nnapi) options.addNnapi()
-            env.createSession(path, options)
+            if (nnapi) options.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED))
+            if (mode == ComputeMode.AUTO) {
+                val prefix = try { File.createTempFile("ort-profile-", ".tmp", profileDirectory) } catch (_: Exception) { null }
+                if (prefix != null) {
+                    try {
+                        options.enableProfiling(prefix.absolutePath)
+                        profilePrefix = prefix
+                    } catch (_: Exception) {
+                        cleanProfile(prefix)
+                    }
+                }
+            }
+            try {
+                env.createSession(path, options)
+            } catch (error: Exception) {
+                profilePrefix?.let { cleanProfile(it) }
+                profilePrefix = null
+                throw error
+            }
         }
+        provider = if (mode == ComputeMode.AUTO) "NNAPI requested; execution unverified" else "CPU"
         recognition = if (mode == ComputeMode.AUTO) {
             try {
-                create(true).also { provider = "NNAPI requested, CPU fallback" }
+                create(true)
             } catch (_: Exception) {
-                create(false).also { provider = "CPU (NNAPI unavailable)" }
+                create(false)
             }
-        } else create(false).also { provider = "CPU" }
+        } else create(false)
         sessionMode = mode
         sessionDirectory = installed.directory
         return recognition!!
+    }
+
+    private fun finishProfiling(session: OrtSession, completed: Boolean) {
+        val prefix = profilePrefix ?: return
+        profilePrefix = null
+        try {
+            val result = File(session.endProfiling())
+            if (completed && result.parentFile == prefix.parentFile && result.name.startsWith(prefix.name + "_") && result.name.endsWith(".json")) {
+                val diagnostics = parseComputeProfile(result.readText())
+                provider = diagnostics.label
+                Log.i("StilltypeCompute", "ORT node events: NNAPI=${diagnostics.nnapiNodes}, CPU=${diagnostics.cpuNodes}, complete=${diagnostics.complete}")
+            }
+        } catch (_: Exception) {
+            // Diagnostics must not replace or suppress recognition errors.
+        } finally {
+            cleanProfile(prefix)
+        }
+    }
+
+    private fun cleanProfile(prefix: File) {
+        try {
+            val files = prefix.parentFile?.listFiles()
+            if (files == null) {
+                Log.w("StilltypeCompute", "Could not inspect temporary ORT profile directory")
+                return
+            }
+            for (file in files) {
+                if (file == prefix || (file.name.startsWith(prefix.name + "_") && file.name.endsWith(".json"))) {
+                    if (!file.delete()) Log.w("StilltypeCompute", "Could not delete temporary ORT profile")
+                }
+            }
+        } catch (_: Exception) {
+            Log.w("StilltypeCompute", "Could not delete temporary ORT profile")
+        }
     }
 
     override fun close() {
@@ -173,7 +239,11 @@ class AndroidRecognizer(context: Context, private val models: ModelRepository) :
             try { analyzer?.close() } finally {
                 analyzer = null
                 detectorDirectory = null
-                try { recognition?.close() } finally {
+                try {
+                    recognition?.let { session ->
+                        try { finishProfiling(session, false) } finally { session.close() }
+                    }
+                } finally {
                     recognition = null
                     sessionDirectory = null
                     sessionMode = null

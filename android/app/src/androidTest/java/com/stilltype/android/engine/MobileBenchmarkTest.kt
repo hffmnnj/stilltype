@@ -13,14 +13,18 @@ import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.stilltype.android.StilltypeApplication
+import com.stilltype.android.core.ComputeMode
+import com.stilltype.android.core.MouthFrame
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.roundToInt
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -28,6 +32,40 @@ import org.junit.runner.RunWith
 /** Real-model CPU smoke benchmark; the supplied public fixture is not an accuracy test. */
 @RunWith(AndroidJUnit4::class)
 class MobileBenchmarkTest {
+    @Test
+    fun autoRecognizer_reportsExecutionEvidenceForRealModel() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val models = (context.applicationContext as StilltypeApplication).models
+        models.prepareBundled()
+        assertNotNull("Bundled model preparation failed: ${models.status.value.error}", models.installedModels())
+        val shape = JSONObject(File(context.filesDir, "benchmark-input.json").readText()).getJSONArray("shape")
+        val count = shape.getInt(1)
+        assertTrue(count in 25..200)
+        val input = ByteBuffer.wrap(File(context.filesDir, "benchmark-input.f32").readBytes())
+            .order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+        assertEquals(count * 88 * 88, input.remaining())
+        val frames = List(count) { index ->
+            val pixels = ByteArray(96 * 96) { 124.toByte() }
+            for (y in 0 until 88) for (x in 0 until 88) {
+                pixels[(y + 4) * 96 + x + 4] =
+                    ((input.get() * 0.165f + 0.421f) * 255f).roundToInt().coerceIn(0, 255).toByte()
+            }
+            MouthFrame(pixels, index * 40L)
+        }
+        AndroidRecognizer(context, models).use { recognizer ->
+            val result = recognizer.recognize(frames, ComputeMode.AUTO)
+            assertNull("Recognition failed: ${result.error}", result.error)
+            assertTrue("Unexpected provider label: ${result.backend}", result.backend in setOf(
+                "CPU", "NNAPI execution", "NNAPI execution + CPU", "NNAPI requested; execution unverified",
+            ))
+            val summary = "device=${Build.MANUFACTURER} ${Build.MODEL}; sdk=${Build.VERSION.SDK_INT}; " +
+                "frames=${result.frames}; inferenceMs=${result.inferenceMs}; provider=${result.backend}"
+            Log.i("StilltypeBenchmark", summary)
+            instrumentation.sendStatus(0, Bundle().apply { putString("stilltypeAutoCompute", summary) })
+        }
+    }
+
     @Test
     fun analyze_uniformGrayFrame_reportsBrightnessWithoutDetectorError() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

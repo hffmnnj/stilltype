@@ -228,10 +228,46 @@ Use `adb -s SERIAL` when more than one device is connected. The debug-only
 
 ## Compute notes
 
-`AUTO` requests NNAPI with CPU fallback (`CPU (NNAPI unavailable)` when the
-request fails); the provider string this produces is a request outcome, not
-proof of GPU offload. Analysis and recognition sessions use four intra-op
-threads. New recording sessions default to **120 seconds**, configurable down
+`AUTO` requests NNAPI with `CPU_DISABLED`, excluding NNAPI's reference CPU
+device while retaining ONNX Runtime CPU kernels for unsupported partitions.
+The first recognition inference in each AUTO session is profiled locally.
+Executed provider events produce `NNAPI execution`, `NNAPI execution + CPU`,
+or `CPU`. If the trace is unavailable or incomplete, the result says
+`NNAPI requested; execution unverified`. This describes observed ORT execution
+providers, **not proof of GPU versus NPU use or a measured speedup**. It is a
+sample of the first inference, not a hardware trace for every later window.
+The old 0.1.0 label `NNAPI requested, CPU fallback` was unconditional after
+session creation and did not establish CPU-only execution.
+
+Profiling contains operator/provider metadata, not pixels or transcript text;
+the temporary trace is removed after reading. Logcat tag `StilltypeCompute`
+contains provider event counts only. Explicit `CPU` mode remains CPU-only and
+does not enable profiling. Analysis and recognition use four intra-op threads.
+
+The INT8 graph includes a 3D convolution and dynamically quantized matrix
+operators. The [ORT NNAPI supported-op table](https://onnxruntime.ai/docs/execution-providers/NNAPI-ExecutionProvider.html)
+supports only 2D convolution and does not list `MatMulInteger` or
+`DynamicQuantizeLinear`; those operators cannot be assumed to offload. Other
+supported subgraphs may still use NNAPI. Android also
+[deprecated NNAPI in Android 15](https://developer.android.com/ndk/guides/neuralnetworks/migration-guide).
+Enabling a provider or changing a label does not make the entire model GPU-compatible.
+
+The real-model AUTO diagnostic on the API 36 x86_64 emulator observed 50 NNAPI
+partition events and 1,228 ORT CPU node events on a 200-frame fixture, taking
+3,196 ms for inference. These are event counts, not percentages of work, and
+the emulator is not evidence of physical Pixel acceleration. Reproduce with:
+
+```sh
+adb shell am instrument -w -r \
+  -e class 'com.stilltype.android.engine.MobileBenchmarkTest#autoRecognizer_reportsExecutionEvidenceForRealModel' \
+  com.stilltype.android.test/androidx.test.runner.AndroidJUnitRunner
+adb logcat -d -s StilltypeCompute:I StilltypeBenchmark:I
+```
+
+Use the same bundled app/test APK and staged public fixture described above.
+Physical Pixel graph placement remains unverified until that device runs it.
+
+New recording sessions default to **120 seconds**, configurable down
 to shorter limits. Up to 3,001 mouth crops are buffered (about 27 MiB of
 pixel data); sequential inference windows stay within 8 seconds / 200 model
 frames. Later windows are joined in order rather than truncated. Empty,
