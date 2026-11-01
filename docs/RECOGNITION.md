@@ -635,11 +635,11 @@ frozen before their scoring, and failures remain in the denominator:
 | FLARE Large, ungated beam 50 | 118/161 = 73.29% | 0/12 |
 | Adapted Large visual LLM, ungated greedy | 131/161 = 81.37% | 0/12 |
 
-No system recognized a complete development sentence exactly. The best result
-has only **15.15% fewer errors** than the current host INT8 baseline, not a
-halving or near-90% recognition. All candidates failed the predeclared rule of
-at least 25% fewer development errors than both current baselines, so no candidate
-received a new locked test/confirmation run. The larger model was not selected.
+None of these six initial systems recognized a complete development sentence
+exactly. Their best result has only **15.15% fewer errors** than the current host
+INT8 baseline, not a halving or near-90% recognition. All failed the predeclared
+rule of at least 25% fewer development errors than both current baselines, so none
+received a locked test/confirmation run. The larger model was not selected.
 The coordinator independently reproduced both Base and Large adapted models'
 first raw prediction and natural EOS with the public native runner.
 
@@ -651,6 +651,136 @@ tensors matched the source bit-for-bit. Like the Base adaptation, its internal
 training encoder identity is unresolved, and the older quantized 7B base differs
 from the training representation. These are approximate research runs, not
 paper parity, Android results, or grounds for an ungated default switch.
+
+### Personal visual adaptation
+
+Training the visual model for this participant helped more than increasing model
+size or asking a language model to repair its output. **This is person-specific
+research, not a general silent-dictation or phone accuracy claim.** The newly
+fine-tuned weights are not included in the APK or desktop default, and are not
+redistributed in this repository. The original checkpoint's non-commercial terms
+still apply.
+
+The fixed training set contains 500 unique utterances from the twenty
+`SoniSpeech_silent_train` sessions in the same Cornell archive. Selection excluded
+all 36 normalized evaluation text hashes and the evaluation source-video hash.
+The training videos were range/CRC/SHA-256 checked and their actual durations
+verified before final selection. Of 1,000 records, 878 met the text, timestamp and
+duration rules; 122 were excluded, including 17 beyond the actual video end.
+Python's `random.Random(20261107).sample(sorted_eligible, 500)` fixed the set before
+training. All 500 complete-frame preparations succeeded without truncation or
+replacement. This excludes known overlap with these evaluation utterances, not
+unknown overlap in the original pretrained model, and does not create a new
+speaker population. The training-manifest SHA-256 is
+`67de67a6f5825be7289aa300c27fa4be84592ea268bcd6ec36c3cadbaf00272e`.
+
+A five-epoch decoder-only run with cached frozen visual features gave 127/161
+silent development errors, versus the original Base model's 130/161. That small
+gain did not qualify for locked evaluation. A separate full-clip desktop joint
+decoder, without its motion veto, still gave 143/161 errors at beam 5 and 142/161
+at beam 40. Bypassing the activity gate alone did not solve silent recognition;
+the application's quiet-input checks were not weakened.
+
+The stronger fixed recipe started from the original Base checkpoint and trained
+visual Transformer blocks 8–11 plus the text decoder for ten epochs. It used
+FP32, seed 20261109, AdamW with learning rates 0.00005/0.00002, weight decay 0.01,
+batch size one with accumulation eight, gradient clipping at one and label
+smoothing 0.1. The final four-example accumulation group was normalized by four.
+Targets use the project's word normalization, deterministic SentencePiece and an
+initial EOS token; none contained unknown tokens. Frozen parent modules stayed in
+evaluation mode, while the selected blocks and decoder trained. Direct equivalent
+encoder/decoder calls avoid the upstream update-counter no-gradient wrapper.
+All four visual blocks and the decoder had finite nonzero first gradients, and
+the unselected state hash was unchanged. Training loss fell from 2.128 to 1.173;
+loss is not the accuracy measurement.
+
+The development result passed the fixed 25% improvement rule, so the unchanged
+model then received locked test and confirmation evaluation. Raw ungated beam-50
+predictions were frozen before scoring. All rejected current-model clips remain
+in the denominator:
+
+| Host system | Development, 161 words | Test, 110 words | Confirmation, 168 words |
+| --- | ---: | ---: | ---: |
+| Current desktop, joint beam 5 and existing gate | 156/161 = 96.89% | 103/110 = 93.64% | 168/168 = 100.00% |
+| Current INT8 CTC, evidence gate and desktop alignment | 132/161 = 81.99% | 93/110 = 84.55% | 141/168 = 83.93% |
+| Personal top-four-block adaptation, ungated beam 50 | 71/161 = 44.10% | 45/110 = 40.91% | 90/168 = 53.57% |
+
+The personal model had no preparation or inference failures. One test sentence
+was exact; no development or confirmation sentence was. Against host INT8, test
+errors fell **51.61%**, but confirmation errors fell only **36.17%**. Combined
+held-out errors fell from 234 to 135, **42.31% fewer**, not a robust halving or
+the 10% WER target. Both splits still share the same participant and recording.
+On the unchanged ordinary-speech development set, errors rose from 20/170 to
+23/170. This regression is another reason not to replace the general model.
+The coordinator independently reloaded the partial weights and reproduced a
+complete development and test raw prediction and visual score.
+
+The personal development prediction SHA-256 is
+`3481b247eeb7a979fd08b2f6557c90f43d2629e5fed45a13deb75a053f16cf42`;
+the combined locked prediction SHA-256 is
+`322fe82a451c5577ac72488f6fa6d0e842c715cc68e3442f6f59bf6814d04b0d`.
+The private changed-state artifact is
+`81b289b030acc2c96d9163a9bf3b0c66aae673932fec3e54c162bcb4fb88b719`.
+These identify the measured run; they are not downloadable datasets or weights.
+
+Optional production Qwen3.5 4B Intent was also measured on these twelve personal
+development outputs, receiving only each raw hypothesis and empty context. It
+completed all twelve without fallback but left word errors at **71/161**. It
+failed the fixed eligibility rule of at most 60 errors, so no new held-out
+Intent run was made. Formatting changes are not visual accuracy gains.
+
+A further fixed twenty-epoch run started from the personal model and trained all
+twelve visual blocks, the final shared CNN stage and downsample/norm, the visual
+projections/fusion bridges and decoder. Training used paired random crops and
+horizontal flips, with no evaluation augmentation or references. All four
+selected parameter groups had finite nonzero gradients, shared CNN parameters
+were not duplicated in the optimizer, and the remaining state was unchanged.
+Despite lower training loss, silent development errors stayed at **71/161** and
+natural development worsened to **24/170**. Both twelve-clip generations completed
+without error. It failed the predeclared at-most-60 rule and received no fresh
+held-out run. More trainable parameters and lower training loss did not establish
+better recognition.
+
+#### Reproduce the personal training recipe
+
+`tools/adapt_flare.py` exposes the fixed first-stage recipe without evaluation
+inputs or downloads. It requires CUDA, the trusted FLARE source revision and
+Python 3.10 dependencies listed under [portable utilities](#portable-flare-research-utilities),
+plus rights to your paired training material. Supply exactly 500 unique items
+in a private JSON manifest with `schemaVersion: 1`; each item has an opaque `id`,
+a `sample` path and its paired `text`. Relative paths resolve from the manifest.
+Each NPZ contains only equal `face` and `lip` uint8 arrays `[T,96,96]`, with
+1–200 frames. This is an already-prepared, short-utterance training input, not a
+new limit on two-minute application recordings.
+
+```sh
+"$EXPORT_PY" tools/adapt_flare.py \
+  --checkpoint /path/flare-base-finetuned.pt --source /path/trusted-FLARE \
+  --training-manifest /private/training/manifest.json \
+  --output /private/new-personal-model --accept-license
+
+TMPDIR=/path/private-scratch python -m unittest discover -s tools \
+  -p test_flare_adaptation.py -v
+```
+
+The tool refuses private inputs, weights or outputs inside Git working trees,
+existing output paths, duplicate identities/texts and invalid arrays. It checks
+bounded immutable NPZ member bytes before array allocation and uses no pickle
+arrays. Checkpoint verification precedes trusted source import and the narrow
+`weights_only=True` load. Output is a new owner-only directory containing partial
+changed weights and provenance/gradient/state metadata. Labels and pixels are
+not copied into metadata or progress logs. A failed run can leave private partial
+weights, but no completed metadata; cleanup of a temporary file after successful
+publication is nonfatal. The supplied source remains trusted executable code,
+not a sandbox. Nine focused boundary tests pass, including input replacement
+during header checking and oversized declared-array refusal.
+
+The coordinator also ran the public CLI through all ten epochs on the same 500
+private examples, preserving their original order in the new manifest schema.
+Every epoch mean loss, first gradient norm and before/after state-group hash
+matched the measured research run. The entire saved `changed-state.pt` file was
+byte-identical to the artifact identified above, not merely similar on one
+prediction. The real output directory was mode `0700` and both files `0600`.
 
 ### Rejected sampling change
 
