@@ -117,7 +117,7 @@ def export(checkpoint: Path, output: Path) -> dict[str, Any]:
     check_schema(adapter, expected_adapter, torch.float32)
     check_schema(projection, PROJECTION_SHAPES, torch.float32)
 
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, mode=0o700, exist_ok=False)
     peft = output / "peft"
     peft.mkdir()
     adapter_path, projection_path = peft / "adapter_model.safetensors", output / "projection.safetensors"
@@ -210,7 +210,7 @@ def project(model_dir: Path, projection_path: Path, sample: Path, output: Path) 
     if data.shape != (length, 3584) or not np.isfinite(data).all():
         raise ValueError("invalid or nonfinite projected features")
     projected_at = time.monotonic()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, mode=0o700, exist_ok=False)
     visual = output / "visual.bin"
     with visual.open("xb") as stream:
         stream.write(struct.pack("<II", length, 3584))
