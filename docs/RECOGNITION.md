@@ -1053,3 +1053,44 @@ profile attributed only 1.14% of summed kernel time to those two convolutions;
 matrix multiplication dominated. No Android partitioning or GPU benefit was
 measured. The conversion was not adopted: removing unsupported operators alone
 does not establish a faster phone pipeline.
+
+### Static quantization for NNAPI-compatible matrix operations
+
+The current mobile CTC graph contains 86 `MatMulInteger` and 51
+`DynamicQuantizeLinear` nodes, neither listed as supported by the official
+[NNAPI execution provider](https://onnxruntime.ai/docs/execution-providers/NNAPI-ExecutionProvider.html).
+That provider supports `QLinearMatMul` with constant weights and quantization
+parameters, but its convolution support is two-dimensional. Replacing matrix
+operators therefore cannot by itself make the model's 3D frontend run on NNAPI,
+prove a GPU/NPU partition, or remove legitimate ORT CPU fallback.
+
+A reference-free experiment first made a fixed-200-frame FP32 control with an
+explicit valid-frame mask and normalized-zero padding. All 24 complete
+development greedy strings and emitted token IDs matched the original variable-
+length FP32 graph; the largest valid-logit difference was 0.002801. The
+coordinator reproduced a separate 87-frame case and verified that an incorrect
+mask changes valid logits. Padding cannot simply be treated as real video.
+
+Static quantization then used sixteen fixed training inputs, selected with seed
+20261110, without reference text or evaluation-based calibration. ORT QOperator
+quantization used unsigned eight-bit activations/weights, per-channel off,
+MinMax calibration and constant-weight MatMul/Gemm only. The result contains 86
+constant-parameter `QLinearMatMul` nodes and no dynamic-quantization matrix nodes.
+It is an experimental 153,789,587-byte graph, not an application model update.
+
+| Full-clip host graph-only decode | Ordinary-speech development, 170 words | Silent development, 161 words |
+| --- | ---: | ---: |
+| Original FP32 | 43 | 134 |
+| Fixed-200 masked FP32 control | 43 | 134 |
+| Original dynamic INT8 | 43 | 133 |
+| Static INT8 candidate | 44 | 133 |
+
+These use every prepared frame without the application's activity gate or
+speech-span trimming; they are not interchangeable with the earlier pipeline
+scores. All outputs were finite. Static INT8 matched the original FP32 raw text
+on only 7/24 clips, versus 14/24 for dynamic INT8; transcript agreement is not
+itself accuracy. Summed CPU graph-call time across the 24 inputs was 11.811
+seconds for static INT8 versus 7.999 for dynamic INT8 in separate four-thread
+host runs, excluding graph loading, capture and preparation. There was no
+accuracy gain or host speed benefit. No Android placement test was performed,
+no GPU/NPU improvement is claimed, and this candidate was not adopted.
