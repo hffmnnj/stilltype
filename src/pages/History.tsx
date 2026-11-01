@@ -38,7 +38,7 @@ function EditDialog({ entry, onClose }: { entry: HistoryEntry | null; onClose: (
       {entry ? (
         <DialogContent
           title="Edit transcript"
-          description="Changes are saved to this entry. The raw model output is kept as it was."
+          description="Changes are saved to this entry. The original recognition is kept as it was."
           footer={
             <>
               <DialogClose asChild><Button variant="ghost">Cancel</Button></DialogClose>
@@ -214,7 +214,7 @@ export function History() {
                       <p className="entry-text">{h.text}</p>
                       {h.raw.trim() && h.raw.trim() !== h.text.trim() ? (
                         <details className="raw">
-                          <summary>Raw model output</summary>
+                          <summary>Original recognition</summary>
                           <p>{h.raw}</p>
                         </details>
                       ) : null}

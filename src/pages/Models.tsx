@@ -1,12 +1,12 @@
 import { AlertTriangle, CheckCircle2, Download, RefreshCw } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Dialog, DialogClose, DialogContent } from '../components/ui/dialog';
 import { Button, Notice, PageHeader, Segmented, Spinner } from '../components/ui/misc';
 import { Toggle } from '../components/ui/switch';
 import { api, errorMessage, isDesktop, listenNative } from '../lib/api';
 import type { InstallProgress } from '../lib/api';
 import { useStore } from '../lib/store';
-import type { CleanupStatus, Settings } from '../lib/types';
+import type { CleanupMode, CleanupModel, CleanupStatus, Settings } from '../lib/types';
 
 function Row({ label, value, ok }: { label: string; value: string; ok?: boolean }) {
   return (
@@ -169,30 +169,63 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+const modelChoices: { value: CleanupModel; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'qwen3.5-0.8b-2026-q4', label: 'Qwen3.5 0.8B' },
+  { value: 'qwen3.5-2b-2026-q4', label: 'Qwen3.5 2B' },
+  { value: 'qwen3.5-4b-2026-q4', label: 'Qwen3.5 4B' },
+];
+
+function modelLabel(status: CleanupStatus | null, id: string): string {
+  return status?.models.find((m) => m.id === id)?.label ?? modelChoices.find((m) => m.value === id)?.label ?? id;
+}
+
 function Cleanup() {
   const { settings, updateSettings } = useStore();
   const [status, setStatus] = useState<CleanupStatus | null>(null);
   const [busy, setBusy] = useState(true);
+  const [switching, setSwitching] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   const [progress, setProgress] = useState<InstallProgress | null>(null);
   const [consent, setConsent] = useState(false);
   const [agreed, setAgreed] = useState(false);
+  const [target, setTarget] = useState<{ label: string; bytes: number } | null>(null);
+  const token = useRef(0);
 
   const refresh = useCallback(async () => {
+    const mine = ++token.current;
     setBusy(true);
     setErr(null);
     try {
-      setStatus(await api.cleanupStatus());
+      const next = await api.cleanupStatus();
+      if (mine === token.current) setStatus(next);
     } catch (e) {
-      setErr(errorMessage(e));
+      if (mine === token.current) setErr(errorMessage(e));
     } finally {
-      setBusy(false);
+      if (mine === token.current) setBusy(false);
     }
   }, []);
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Status always describes the saved selection, so wait for the save before asking again.
+  const chooseModel = async (value: CleanupModel) => {
+    if (value === settings.cleanupModel) return;
+    token.current++;
+    setStatus(null);
+    setBusy(true);
+    setProgress(null);
+    setErr(null);
+    setSwitching(true);
+    try {
+      await updateSettings({ cleanupModel: value });
+    } finally {
+      setSwitching(false);
+      void refresh();
+    }
+  };
 
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -215,7 +248,10 @@ function Cleanup() {
     setErr(null);
     setProgress({ stage: 'runtime', message: 'Starting', progress: 0 });
     try {
-      setStatus(await api.installCleanup(true));
+      const next = await api.installCleanup(true);
+      token.current++;
+      setStatus(next);
+      setBusy(false);
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
@@ -224,17 +260,34 @@ function Cleanup() {
     }
   };
 
-  const ready = Boolean(status?.ready);
+  const checking = busy || switching || !status;
+  const ready = !checking && Boolean(status?.ready);
   const pct = Math.round((progress?.progress ?? 0) * 100);
+  const locked = installing || switching;
+  const modelName = status ? modelLabel(status, status.modelId) : '';
+  const recommendedName = status ? modelLabel(status, status.recommendedModelId) : '';
+  const sizeKnown = Boolean(status && status.totalBytes > 0);
+  const choiceText = (c: { value: CleanupModel; label: string }) => {
+    const m = status?.models.find((x) => x.id === c.value);
+    if (c.value === 'auto') return isDesktop && status && !checking ? `Auto · ${recommendedName} for this device` : 'Auto';
+    return m ? `${c.label} · ${formatBytes(m.totalBytes)}${m.installed ? ' · installed' : ''}` : c.label;
+  };
+  const openConsent = () => {
+    if (!status) return;
+    setTarget({ label: modelName, bytes: status.totalBytes });
+    setAgreed(false);
+    setConsent(true);
+  };
+  const intent = settings.cleanupMode === 'intent';
 
   return (
     <section className="block" aria-labelledby="cleanup-h">
       <div className="block-head">
         <h2 id="cleanup-h" className="section-title">Transcript cleanup</h2>
-        <span className={`status ${ready ? 'status-ok' : 'status-idle'}`}>{busy || !status ? 'Checking' : ready ? 'Ready' : 'Not installed'}</span>
+        <span className={`status ${ready ? 'status-ok' : 'status-idle'}`}>{checking ? 'Checking' : ready ? 'Ready' : 'Not installed'}</span>
       </div>
       <p className="lede">
-        Tidies casing and punctuation on this device with a small bundled text model. The raw output is always kept.
+        Runs a small Qwen3.5 text model on this device after recognition. The original recognition is always kept.
       </p>
 
       {!isDesktop ? (
@@ -243,19 +296,53 @@ function Cleanup() {
         </Notice>
       ) : null}
 
+      <div className="row">
+        <div className="row-text">
+          <label htmlFor="cleanup-model" className="row-label">Model</label>
+          <p className="row-hint">Auto picks by memory and uses an installed tier before downloading. This is capacity, not accuracy.</p>
+        </div>
+        <select
+          id="cleanup-model"
+          className="field select"
+          value={settings.cleanupModel}
+          disabled={locked}
+          onChange={(e) => void chooseModel(e.target.value as CleanupModel)}
+        >
+          {modelChoices.map((c) => <option key={c.value} value={c.value}>{choiceText(c)}</option>)}
+        </select>
+      </div>
+
+      <div className="row">
+        <div className="row-text">
+          <p className="row-label">Mode</p>
+          <p className="row-hint">
+            {intent
+              ? 'Experimental. May change wording, so review the result. Falls back to the recognized text with a warning when edits go too far.'
+              : 'Casing and punctuation only. Every word is kept.'}
+          </p>
+        </div>
+        <Segmented<CleanupMode>
+          label="Cleanup mode"
+          value={settings.cleanupMode}
+          disabled={installing}
+          onChange={(v) => void updateSettings({ cleanupMode: v })}
+          options={[{ value: 'format', label: 'Format' }, { value: 'intent', label: 'Intent' }]}
+        />
+      </div>
+
       <dl className="kvs">
-        <Row label="Engine" value={status ? (status.runtimeBundled ? 'Bundled (llama.cpp)' : 'Not bundled') : '…'} ok={status ? status.runtimeBundled : undefined} />
-        <Row label="Cleanup model" value={status?.modelId ?? '…'} />
-        <Row label="Download size" value={status ? formatBytes(status.totalBytes) : '…'} />
-        <Row label="Compute" value={status?.device ?? '…'} />
+        <Row label="Engine" value={status && !checking ? (status.runtimeBundled ? 'Bundled (llama.cpp)' : 'Not bundled') : '…'} ok={status && !checking ? status.runtimeBundled : undefined} />
+        <Row label="Selected model" value={checking || !status ? '…' : `${modelName}${isDesktop && status.modelId !== status.recommendedModelId ? ` (recommended: ${recommendedName})` : ''}`} ok={checking || !status ? undefined : status.modelInstalled} />
+        <Row label="Download size" value={checking || !status ? '…' : sizeKnown ? formatBytes(status.totalBytes) : 'Unavailable'} />
+        <Row label="Compute" value={checking || !status ? '…' : status.device} />
       </dl>
 
-      {status?.error ? <Notice tone="error">{status.error}</Notice> : null}
+      {!checking && status?.error ? <Notice tone="error">{status.error}</Notice> : null}
       {err ? (
-        <Notice tone="error" action={<Button onClick={() => void refresh()}>Retry</Button>}>{err}</Notice>
+        <Notice tone="error" action={<Button onClick={() => void refresh()} disabled={locked}>Retry</Button>}>{err}</Notice>
       ) : null}
 
-      {installing || (progress && progress.stage !== 'ready' && progress.stage !== 'error' && !ready) ? (
+      {installing ? (
         <div className="progress-block">
           <div className="progress-line">
             <span>{progress?.message || 'Working'}</span>
@@ -268,21 +355,27 @@ function Cleanup() {
       <Toggle
         checked={settings.cleanupEnabled}
         onCheckedChange={(v) => void updateSettings({ cleanupEnabled: v })}
-        disabled={!ready}
-        label="Tidy transcripts after dictation"
-        hint={ready ? 'Fixes casing and punctuation locally after each transcript.' : 'Download the model below to turn this on.'}
+        disabled={locked || (!ready && !settings.cleanupEnabled)}
+        label={intent ? 'Correct intent after dictation' : 'Tidy transcripts after dictation'}
+        hint={
+          checking
+            ? 'Checking the selected model.'
+            : ready
+              ? intent ? 'Runs after final recognition and keeps the original recognition.' : 'Fixes casing and punctuation locally after each transcript.'
+              : settings.cleanupEnabled ? 'The selected model is not installed, so transcripts stay as recognized.' : 'Download the selected model to turn this on.'
+        }
       />
 
       {!ready ? (
         <div className="actions">
-          <Button variant="primary" disabled={!isDesktop || busy} busy={installing} onClick={() => { setAgreed(false); setConsent(true); }}>
-            <Download size={16} aria-hidden /> {installing ? 'Downloading…' : 'Download cleanup model'}
+          <Button variant="primary" disabled={!isDesktop || checking || locked || !sizeKnown} busy={installing} onClick={openConsent}>
+            <Download size={16} aria-hidden /> {installing ? 'Downloading…' : `Download ${modelName || 'model'}`}
           </Button>
-          {status ? <span className="muted small">About {formatBytes(status.totalBytes)}.</span> : null}
+          {sizeKnown && status ? <span className="muted small">About {formatBytes(status.totalBytes)}.</span> : null}
         </div>
       ) : (
         <div className="actions">
-          <Button onClick={() => void refresh()} busy={busy}>
+          <Button onClick={() => void refresh()} busy={busy} disabled={locked}>
             {!busy ? <RefreshCw size={15} aria-hidden /> : null} Check again
           </Button>
         </div>
@@ -290,8 +383,8 @@ function Cleanup() {
 
       <Dialog open={consent} onOpenChange={setConsent}>
         <DialogContent
-          title="Download the cleanup model?"
-          description={`This downloads the text cleanup model${status ? ` (about ${formatBytes(status.totalBytes)})` : ''} and runs it on this device through the bundled engine. Nothing is uploaded.`}
+          title={`Download ${target?.label ?? 'the cleanup model'}?`}
+          description={`This downloads ${target?.label ?? 'the text model'}${target ? ` (about ${formatBytes(target.bytes)})` : ''} and runs it on this device through the bundled engine. Nothing is uploaded.`}
           footer={
             <>
               <DialogClose asChild><Button variant="ghost">Not now</Button></DialogClose>
@@ -309,7 +402,7 @@ function Cleanup() {
           <label className="consent">
             <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
             <span>
-              I understand this downloads a text cleanup model to this device and runs it locally. Model weights follow their upstream Apache-2.0 terms.
+              I understand this downloads {target?.label ?? 'a text model'} to this device and runs it locally. Model weights follow their upstream Apache-2.0 terms.
             </span>
           </label>
         </DialogContent>

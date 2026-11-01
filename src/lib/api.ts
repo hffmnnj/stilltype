@@ -170,14 +170,17 @@ const browserApi: DesktopApi = {
     throw new Error('Pasting into other apps needs the desktop app.');
   },
   async cleanupStatus(): Promise<CleanupStatus> {
+    const { cleanupModel = 'auto' } = readJson<Partial<Settings>>(KEY.settings, {});
     return {
       runtimeBundled: false,
       modelInstalled: false,
       ready: false,
-      modelId: 'qwen3.5-0.8b-2026-q4',
+      modelId: cleanupModel === 'auto' ? 'qwen3.5-0.8b-2026-q4' : cleanupModel,
       device: 'Browser preview',
       error: null,
       totalBytes: 0,
+      recommendedModelId: 'qwen3.5-0.8b-2026-q4',
+      models: [],
     };
   },
   async installCleanup() {
