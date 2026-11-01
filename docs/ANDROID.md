@@ -442,6 +442,31 @@ Moving cache handling into native graph operations is the next experiment;
 neither raising heap limits nor dropping finite checks is a shipped fix.
 The application and delivered APK still use the existing recognition engine.
 
+### Native cache helper graphs
+
+`tools/export_flare_cache.py` generates two small, weightless CPU graphs for the
+fixed Base-decoder layout. They leave the weighted encoder, cross projections
+and decoder unchanged:
+
+```sh
+python tools/export_flare_cache.py --beam-size 50 --output /path/new-cache-helpers
+python -m unittest discover -s tools -p 'test_flare_cache.py'
+```
+
+This requires NumPy, ONNX and ONNX Runtime for the tests. The output is
+`cache-gather.onnx`, `cache-merge.onnx` and a size/hash-bearing `cache.json`;
+the directory must be new and outside a Git checkout. Beam width 5 uses one
+chunk, and width 50 uses ten five-row chunks. Gather supports duplicated and
+reordered parents, including zero-length past caches. Merge concatenates native
+decoder outputs before selecting parents and returns a scalar finite flag that
+checks **all rows**, not only selected survivors.
+
+Coordinator host ORT tests verified exact NumPy parity, empty chunks/indices,
+prefix length 128, and rejection of NaN and either infinity in an unselected
+row. These are helper-graph checks, not yet proof of Android cache ownership or
+memory use. No weights are included; the helpers do not change the underlying
+checkpoint's non-commercial terms or the application's default engine.
+
 ## Compute notes
 
 `AUTO` requests NNAPI with `CPU_DISABLED`, excluding NNAPI's reference CPU
