@@ -20,7 +20,9 @@ public/vision/ort/
 public/vision/face_detection_yunet_2026may.onnx
 public/vision/*.part
 android/.gradle/
+android/.kotlin/
 android/**/build/
 android/local.properties
+!android/gradle/wrapper/gradle-wrapper.jar
 android/app/src/main/assets/recognition/
 *.onnx.data
