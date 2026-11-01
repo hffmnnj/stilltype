@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import evaluate_lipreading as ev
@@ -235,6 +236,18 @@ class ScorePredictionsCliTest(unittest.TestCase):
 
 
 class AdapterSeparationTest(unittest.TestCase):
+    def test_rejected_last_clip_does_not_replace_the_observed_device(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = ev.load_manifest(_write_manifest(tmp, [_item("first"), _item("last")]))
+            with patch.object(ev, "desktop_predict", side_effect=[
+                ("the cat sat", None, 2000, 12, "cuda"),
+                ("", "no-speech", 2000, 0, None),
+            ]):
+                scored, device = ev.run_desktop(manifest.items, Path(tmp), device="gpu", beam_size=5)
+            self.assertEqual(device, "cuda")
+            self.assertEqual(len(scored), 2)
+            self.assertEqual(scored[1][0]["deletions"], 3)
+
     def test_desktop_model_call_never_sees_reference(self):
         secret = "zebra hedgehog vault phrase"
         seen: list[str] = []

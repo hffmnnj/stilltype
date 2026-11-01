@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -427,7 +428,7 @@ def desktop_predict(
     device: str,
     beam_size: int,
     transcribe_fn=None,
-) -> tuple[str, str | None, int, int, str]:
+) -> tuple[str, str | None, int | None, int | None, str | None]:
     """Run desktop inference on one clip. Returns (raw, error, dur, ms, actual)."""
     if transcribe_fn is None:
         import inference  # noqa: PLC0415 -- lazy so score-only never needs torch
@@ -444,7 +445,7 @@ def desktop_predict(
         result.get("error"),
         result.get("durationMs"),
         result.get("inferenceMs"),
-        result.get("device") or device,
+        result.get("device") or None,
     )
 
 
@@ -454,9 +455,9 @@ def run_desktop(
     *,
     device: str,
     beam_size: int,
-) -> tuple[list[tuple[dict, ManifestItem]], str]:
+) -> tuple[list[tuple[dict, ManifestItem]], str | None]:
     scored: list[tuple[dict, ManifestItem]] = []
-    actual_device = device
+    actual_device = None
     for item in selected:
         clip_abs = manifest_dir / item.clipDir
         wall_start = time.perf_counter()
@@ -464,7 +465,8 @@ def run_desktop(
             raw, error, duration_ms, inference_ms, actual = desktop_predict(
                 str(clip_abs), device=device, beam_size=beam_size
             )
-            actual_device = actual
+            if actual:
+                actual_device = actual
         except Exception as exc:  # noqa: BLE001 -- record infra fault, keep others
             if exc.__class__.__name__ in ("ModelUnavailable", "GpuUnavailable"):
                 raise
@@ -487,6 +489,8 @@ def run_ctc(
     *,
     variant: str,
     mobile_model_dir: Path,
+    beam_size: int = 1,
+    token_top_k: int = 20,
 ) -> tuple[list[tuple[dict, ManifestItem]], dict]:
     """Host CTC export benchmark over every window (no window dropped)."""
     tools_dir = str(Path(__file__).resolve().parent)
@@ -508,6 +512,12 @@ def run_ctc(
         str(model_file), options, providers=["CPUExecutionProvider"]
     )
     tokens = inference.token_list()
+    decode_logits = greedy_decode
+    if beam_size > 1:
+        from ctc_decode import prefix_beam_decode
+
+        def decode_logits(logits, tokens):
+            return prefix_beam_decode(logits, tokens, beam_size=beam_size, token_top_k=token_top_k)
     model_info = {
         "file": model_file.name,
         "sha256": sha256_file(model_file),
@@ -515,13 +525,15 @@ def run_ctc(
         "intraOpThreads": 4,
         "interOpThreads": 1,
         "maxWindowFrames": MAX_WINDOW_FRAMES,
+        "ctcBeamSize": beam_size,
+        "ctcTokenTopK": token_top_k if beam_size > 1 else None,
     }
     scored: list[tuple[dict, ManifestItem]] = []
     for item in selected:
         clip_abs = manifest_dir / item.clipDir
         wall_start = time.perf_counter()
         raw, error, duration_ms, inference_ms = _predict_ctc_clip(
-            inference, greedy_decode, np, session, tokens, clip_abs
+            inference, decode_logits, np, session, tokens, clip_abs
         )
         wall_ms = int((time.perf_counter() - wall_start) * 1000)
         scored.append(
@@ -595,7 +607,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--models", type=Path, default=None)
     parser.add_argument("--device", default="auto", choices=("auto", "gpu", "cpu"))
     parser.add_argument("--beam-size", default=5, type=int)
+    parser.add_argument("--motion-threshold", default=8.0, type=float,
+                        help="Experimental host speech-motion threshold; production baseline is 8.")
     parser.add_argument("--mobile-model-dir", type=Path, default=None)
+    parser.add_argument("--ctc-beam-size", type=int, default=1,
+                        help="1 is the production greedy baseline; >1 enables experimental prefix search.")
+    parser.add_argument("--ctc-token-top-k", type=int, default=20)
     parser.add_argument("--score-predictions", type=Path, default=None)
     return parser.parse_args(argv)
 
@@ -606,6 +623,12 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --beam-size must be a positive integer", file=sys.stderr)
         return 2
     beam_size = max(1, min(100, int(args.beam_size)))
+    if not math.isfinite(args.motion_threshold) or not 0 < args.motion_threshold <= 255:
+        print("error: --motion-threshold must be finite and within (0, 255]", file=sys.stderr)
+        return 2
+    if not 1 <= args.ctc_beam_size <= 100 or not 1 <= args.ctc_token_top_k <= 1047:
+        print("error: CTC beam must be 1..100 and token top-k must be 1..1047", file=sys.stderr)
+        return 2
     try:
         manifest = load_manifest(args.manifest)
     except (OSError, ValueError) as exc:
@@ -627,6 +650,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        if not score_only:
+            import inference
+
+            inference.SPEAKING = args.motion_threshold
+            inference.STILL = args.motion_threshold * 5.0 / 8.0
         if score_only:
             assert args.score_predictions is not None
             by_id = load_predictions(args.score_predictions)
@@ -651,7 +679,7 @@ def main(argv: list[str] | None = None) -> int:
                 manifest_sha256=manifest.sha256,
                 split=args.split,
                 decoder=args.decoder,
-                decode="beam" if args.decoder == "desktop" else "greedy",
+                decode="beam" if args.decoder == "desktop" else ("prefix-beam" if args.ctc_beam_size > 1 else "greedy"),
                 device=None,
                 provider=None,
                 beam_size=beam_size if args.decoder == "desktop" else None,
@@ -680,6 +708,8 @@ def main(argv: list[str] | None = None) -> int:
                         "STILLTYPE_MODELS", ""
                     ),
                     "requestedDevice": args.device,
+                    "motionThreshold": args.motion_threshold,
+                    "pauseThreshold": args.motion_threshold * 5.0 / 8.0,
                 },
                 item_results=scored,
             )
@@ -691,16 +721,19 @@ def main(argv: list[str] | None = None) -> int:
                 manifest.manifest_dir,
                 variant=variant,
                 mobile_model_dir=args.mobile_model_dir,
+                beam_size=args.ctc_beam_size,
+                token_top_k=args.ctc_token_top_k,
             )
+            model_info["motionThreshold"] = args.motion_threshold
             results = finalize_results(
                 dataset_id=manifest.datasetId,
                 manifest_sha256=manifest.sha256,
                 split=args.split,
                 decoder=args.decoder,
-                decode="greedy",
+                decode="prefix-beam" if args.ctc_beam_size > 1 else "greedy",
                 device="cpu",
                 provider="CPUExecutionProvider",
-                beam_size=None,
+                beam_size=args.ctc_beam_size,
                 disclosure=CTC_DISCLOSURE,
                 model_info=model_info,
                 item_results=scored,

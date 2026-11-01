@@ -104,6 +104,7 @@ they establish execution, not natural-speech accuracy.
 
 - [docs/BUILDING.md](docs/BUILDING.md) — desktop prerequisites, GPU/CPU, data paths, uninstall.
 - [docs/ANDROID.md](docs/ANDROID.md) — phone export, build variants, permissions, benchmark.
+- [docs/RECOGNITION.md](docs/RECOGNITION.md) — raw word-error measurement, fixed evaluation sets and accuracy limits.
 - [SECURITY.md](SECURITY.md) — what stays local, what is ephemeral, how to report issues.
 - Recognition: [USR&nbsp;2.0 repository](https://github.com/ahaliassos/usr2) · [paper](https://arxiv.org/abs/2602.19316). Code is MIT; the pretrained checkpoint carries separate research&nbsp;/ data rights — check upstream before your intended use (see [THIRD_PARTY.md](THIRD_PARTY.md)).
 - App code is MIT ([LICENSE](LICENSE)). No signing, no public prebuilt releases yet — build from source for now.

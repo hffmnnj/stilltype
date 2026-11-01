@@ -87,6 +87,23 @@ manifest and prepared-clip hashes, source provenance, decoder settings and
 timings. Existing results are not overwritten. `targetMet` refers only to the
 selected samples; it is not a claim of representative 90% accuracy.
 
+### Experimental comparisons
+
+`--motion-threshold` changes the host motion gate for an experiment only; the
+production baseline is 8. `--ctc-beam-size 10 --ctc-token-top-k 20` selects a
+token-pruned CTC prefix-marginal decoder. The default `--ctc-beam-size 1` keeps
+greedy decoding. Prefix search sums paths that collapse to the same output;
+it has no language model, word list, length bonus or reference input. It is
+not the desktop joint attention/CTC decoder, and a higher-probability prefix
+does not necessarily have fewer word errors.
+
+```sh
+python tools/evaluate_lipreading.py --manifest /path/evaluation/manifest.json \
+  --split dev --decoder ctc-int8 --mobile-model-dir /path/mobile-model \
+  --ctc-beam-size 10 --ctc-token-top-k 20 --motion-threshold 8 \
+  --output /path/evaluation/ctc-prefix10.json
+```
+
 For independently captured predictions, use `--score-predictions /path/preds.json`.
 That file contains an `items` array with `id`, `raw` and `error` (null on success).
 IDs must cover the selected split exactly. This mode needs no torch, ORT or
@@ -95,4 +112,64 @@ weights, and does not run inference.
 ```sh
 python -m unittest discover -s tools -p 'test_evaluation.py' -v
 python -m unittest discover -s tools -p 'test_prepare_evaluation.py' -v
+python -m unittest discover -s tools -p 'test_ctc_decode.py' -v
 ```
+
+## First fixture comparison: GRID, November 2026
+
+**The 10% WER target was not reached.** This small out-of-domain comparison
+exposed substantial failures; it does not support a 90% product-accuracy claim.
+
+Source: the [University of Sheffield GRID corpus](https://spandh.dcs.shef.ac.uk/gridcorpus/),
+which states the recordings and transcriptions are freely available for research
+use. No dataset content is redistributed here. GRID uses a constrained six-word
+grammar, not natural open dictation. These are ordinary spoken recordings,
+with no audio used by recognition. Training overlap is unknown, and two
+speakers do not establish population-level performance.
+
+The fixed set has 20 clips / 120 reference words from speaker 1 for development
+and 20 / 120 from speaker 2 for testing. IDs were selected before inference:
+sort the intersection of MPEG and alignment-file stems for each speaker, then
+use `random.Random(20261101 + speaker).sample(ids, 20)` in Python 3.12 and sort
+the result. Videos are the normal-quality archives `s1/video/s1.mpg_vcd.zip`
+and `s2/video/s2.mpg_vcd.zip`, with references from `s1/align/s1.tar` and
+`s2/align/s2.tar`, all linked by the corpus page. The local manifest SHA-256 is
+`8fe59857e3159977088d4d98560436678ce3ac447c170b47c2b83c0f7b797c1a`.
+Per-item source hashes refer to the extracted MPEG files. References, raw
+hypotheses and prepared frames remain outside Git.
+
+Preparation produced 3,000 frames at 25 fps; YuNet detected a face in 2,988.
+All rows below use the original motion threshold of 8, no vocabulary or
+cleanup, and include rejected clips as full deletions:
+
+| Decoder | Development WER | Test WER |
+| --- | ---: | ---: |
+| Desktop Base+ joint beam 5 | 87.50% | 97.50% |
+| Desktop Base+ joint beam 40 | 88.33% | 97.50% |
+| Host CTC FP32 greedy | 88.33% | 95.83% |
+| Host CTC INT8 greedy | 88.33% | 95.83% |
+| Host CTC INT8 prefix beam 10, top 20 tokens | 88.33% | 95.00% |
+
+No configuration produced an exact six-word sentence. The motion gate rejected
+6/20 development and 15/20 test clips as `no-speech`, despite the supplied speech
+annotations. This is a major pipeline weakness, not a reason to exclude those
+clips from the score. Beam 40 roughly doubled development model-inference time
+(7.0 to 14.9 seconds across the set) without improving WER. Prefix search
+changed only one test word error overall and did not improve development WER;
+it is not enabled in the app.
+
+Lowering the gate to 4 admitted all development speech clips and reduced host
+INT8 development WER to 77.50%, but also admitted **7/27 annotated non-speech
+control segments**, versus 0/27 at the original threshold. Controls were natural
+`sil`/`sp` regions of the same development videos, with alignment positions
+interpreted at the corpus's 25 kHz audio rate, trimmed by 100 ms at the start and 40 ms at the end,
+and required at least 13 video frames. Admission means a segment could reach
+recognition, not that it generated a false transcript. That safety regression
+was enough to reject the lower production threshold; it was not tuned further
+against the test speaker.
+
+Desktop inference used an RTX 4050 with CUDA. CTC used host CPU ORT 1.24.3,
+four intra-op threads and one inter-op thread, with OpenCV 4.11 preprocessing.
+These results are not Android device measurements, paper reproductions, or
+silent-mouthing accuracy. A stronger open-speech evaluation and a separately
+consented silent-mouthing set are needed before choosing new app defaults.
